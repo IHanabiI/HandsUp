@@ -26,15 +26,28 @@ public static class NonStandardPreviousStepSnapshotService
 
     public static void CaptureSnapshotFromCurrentCombatStep(RunManager? runManager, string sourceTag)
     {
-        if (!NonStandardSingleplayerRunIdentity.TryCreateScope(runManager, out var scope))
-            return;
+        try
+        {
+            if (!NonStandardSingleplayerRunIdentity.TryCreateScope(runManager, out var scope))
+            {
+                MainFile.Logger.Info($"Skipped non-standard previous-step snapshot capture from {sourceTag} because snapshot scope was unavailable.");
+                return;
+            }
 
-        var payload = BuildSnapshotPayload(runManager);
-        if (payload == null)
-            return;
+            var payload = BuildSnapshotPayload(runManager);
+            if (payload == null)
+            {
+                MainFile.Logger.Info($"Skipped non-standard previous-step snapshot capture from {sourceTag} because snapshot payload was unavailable.");
+                return;
+            }
 
-        ClearSnapshotsIfScopeChanged(scope, payload.RoomScopeKey);
-        WriteSnapshotPayload(scope, payload, sourceTag);
+            ClearSnapshotsIfScopeChanged(scope, payload.RoomScopeKey);
+            WriteSnapshotPayload(scope, payload, sourceTag);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Error($"Failed to capture non-standard previous-step snapshot from {sourceTag}: {e}");
+        }
     }
 
     public static void ClearSnapshots(RunManager? runManager, string reason)
@@ -129,24 +142,22 @@ public static class NonStandardPreviousStepSnapshotService
         if (runState == null || !runManager!.IsSinglePlayerOrFakeMultiplayer)
             return null;
 
-        var currentRoom = runState.CurrentRoom;
-        if (currentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
+        if (runState.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
             return null;
 
-        var roomSnapshot = currentRoom.ToSerializable();
+        var roomSnapshot = SingleplayerEventCombatPreviousStepService.CreateRoomSnapshot(runState.CurrentRoom);
         var runSnapshot = runManager.ToSave(null);
-        var stepKey = BuildStepKey(runState, currentRoom);
-        var roomScopeKey = BuildRoomScopeKey(runState, currentRoom);
-        var roundNumber = combatRoom.CombatState.RoundNumber;
+        var stepKey = BuildStepKey(runState, runState.CurrentRoom);
+        var roomScopeKey = BuildRoomScopeKey(runState, runState.CurrentRoom);
 
         return new StepSnapshotPayload
         {
             StepKey = stepKey,
             RoomScopeKey = roomScopeKey,
             FloorIndex = runState.TotalFloor,
-            RoundNumber = roundNumber,
+            RoundNumber = combatRoom.CombatState.RoundNumber,
             CaptureTicksUtc = DateTime.UtcNow.Ticks,
-            RoomType = currentRoom.RoomType.ToString(),
+            RoomType = runState.CurrentRoom.RoomType.ToString(),
             RunJson = SaveManager.ToJson(runSnapshot),
             RoomJson = JsonSerializer.Serialize(roomSnapshot, JsonOptions),
             CombatStateJson = SingleplayerCombatStateSnapshotService.CaptureCurrentCombatStateJson(runState) ?? string.Empty

@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -19,12 +21,14 @@ using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Saves.Runs;
 
 namespace HandsUp.HandsUpCode.Services;
 
 public static class MultiplayerInitialCombatPileSnapshotService
 {
     private const string SnapshotFileName = "handsup_multiplayer_initial_combat_piles.json";
+    private const int SnapshotSchemaVersion = 3;
 
     private static readonly MethodInfo? CombatStateAddCardMethod = typeof(CombatState)
         .GetMethod("AddCard", BindingFlags.Instance | BindingFlags.NonPublic, [typeof(CardModel)]);
@@ -53,10 +57,19 @@ public static class MultiplayerInitialCombatPileSnapshotService
             return;
 
         var existingSnapshot = TryReadSnapshot();
-        if (existingSnapshot != null && existingSnapshot.RoomScope == payload.RoomScope)
+        if (existingSnapshot != null
+            && existingSnapshot.RoomScope == payload.RoomScope
+            && existingSnapshot.SchemaVersion >= SnapshotSchemaVersion)
         {
             MainFile.Logger.Info($"Skipped multiplayer initial combat pile snapshot capture for {payload.RoomScope} because the first-entry snapshot already exists.");
             return;
+        }
+
+        if (existingSnapshot != null && existingSnapshot.RoomScope == payload.RoomScope)
+        {
+            MainFile.Logger.Info(
+                $"Overwriting multiplayer initial combat pile snapshot for {payload.RoomScope} " +
+                $"because the existing snapshot uses schema v{existingSnapshot.SchemaVersion}.");
         }
 
         var snapshotDirectory = Path.GetDirectoryName(ProjectSettings.GlobalizePath(GetSnapshotPath()));
@@ -206,11 +219,16 @@ public static class MultiplayerInitialCombatPileSnapshotService
         var netState = NetFullCombatState.FromRun(runState, null);
         return new MultiplayerCombatPileSnapshot
         {
+            SchemaVersion = SnapshotSchemaVersion,
             RoomScope = BuildRoomScope(runState, combatRoom),
             Players = netState.Players.Select(playerState => new MultiplayerCombatPlayerPileSnapshot
             {
                 PlayerId = playerState.playerId,
-                Piles = playerState.piles.Select(CombatStateSnapshotService.CombatPileSnapshot.FromNetState).ToList()
+                Piles = playerState.piles.Select(pileState =>
+                    CombatPileSnapshot.FromNetState(
+                        pileState,
+                        runState.GetPlayer(playerState.playerId)))
+                    .ToList()
             }).ToList()
         };
     }
@@ -306,9 +324,10 @@ public static class MultiplayerInitialCombatPileSnapshotService
         }
     }
 
-    private static void RestorePlayerPiles(RunState runState, Player player, System.Collections.Generic.IReadOnlyList<CombatStateSnapshotService.CombatPileSnapshot> pileSnapshots)
+    private static void RestorePlayerPiles(RunState runState, Player player, IReadOnlyList<CombatPileSnapshot> pileSnapshots)
     {
         var combat = player.PlayerCombatState!;
+        var usedDeckCards = new HashSet<CardModel>();
         foreach (var existingCard in combat.AllPiles.SelectMany(pile => pile.Cards).ToList())
             existingCard.RemoveFromState();
 
@@ -320,36 +339,27 @@ public static class MultiplayerInitialCombatPileSnapshotService
 
             foreach (var cardSnapshot in pileSnapshot.Cards)
             {
-                var card = runState.LoadCard(cardSnapshot.Card, player);
+                var deckVersion = ResolveDeckVersion(runState, player, cardSnapshot, usedDeckCards);
+                var loadableCard = MultiplayerSerializableCardStateService.ResolveCardForRestore(
+                    cardSnapshot.Card,
+                    player,
+                    deckVersion?.ToSerializable() ?? cardSnapshot.DeckVersionCard);
+                var card = runState.LoadCard(loadableCard, player);
                 RegisterCardInCombatState(card);
-                card.DeckVersion = null;
-
-                if (cardSnapshot.Affliction != null)
-                {
-                    var affliction = ModelDb.GetById<AfflictionModel>(cardSnapshot.Affliction).ToMutable();
-                    card.AfflictInternal(affliction, cardSnapshot.AfflictionCount);
-                }
-
-                if (cardSnapshot.Keywords != null)
-                {
-                    foreach (var keyword in cardSnapshot.Keywords)
-                    {
-                        if (!card.Keywords.Contains(keyword))
-                            card.AddKeyword(keyword);
-                    }
-                }
+                card.DeckVersion = deckVersion;
+                ApplyCardSnapshotState(card, cardSnapshot);
 
                 targetPile.AddInternal(card, -1, false);
             }
         }
     }
 
-    private static void ApplyPreDrawPiles(RunState runState, Player player, System.Collections.Generic.IReadOnlyList<CombatStateSnapshotService.CombatPileSnapshot> pileSnapshots)
+    private static void ApplyPreDrawPiles(RunState runState, Player player, IReadOnlyList<CombatPileSnapshot> pileSnapshots)
     {
         var handSnapshot = pileSnapshots.FirstOrDefault(pile => pile.PileType == PileType.Hand);
         var preDrawSnapshots = pileSnapshots
             .Where(pile => pile.PileType != PileType.Hand)
-            .Select(pile => new CombatStateSnapshotService.CombatPileSnapshot
+            .Select(pile => new CombatPileSnapshot
             {
                 PileType = pile.PileType,
                 Cards = pile.PileType == PileType.Draw
@@ -360,7 +370,7 @@ public static class MultiplayerInitialCombatPileSnapshotService
 
         if (preDrawSnapshots.All(pile => pile.PileType != PileType.Draw))
         {
-            preDrawSnapshots.Add(new CombatStateSnapshotService.CombatPileSnapshot
+            preDrawSnapshots.Add(new CombatPileSnapshot
             {
                 PileType = PileType.Draw,
                 Cards = [.. (handSnapshot?.Cards ?? [])]
@@ -380,7 +390,11 @@ public static class MultiplayerInitialCombatPileSnapshotService
                 return false;
 
             var currentPlayerState = netState.Players.First(player => player.playerId == playerSnapshot.PlayerId);
-            var currentPiles = currentPlayerState.piles.Select(CombatStateSnapshotService.CombatPileSnapshot.FromNetState).ToList();
+            var currentPiles = currentPlayerState.piles.Select(pileState =>
+                CombatPileSnapshot.FromNetState(
+                    pileState,
+                    runState.GetPlayer(playerSnapshot.PlayerId)))
+                .ToList();
             if (!ArePileSnapshotsEquivalent(currentPiles, playerSnapshot.Piles))
                 return false;
         }
@@ -389,8 +403,8 @@ public static class MultiplayerInitialCombatPileSnapshotService
     }
 
     private static bool ArePileSnapshotsEquivalent(
-        System.Collections.Generic.IReadOnlyList<CombatStateSnapshotService.CombatPileSnapshot> currentPiles,
-        System.Collections.Generic.IReadOnlyList<CombatStateSnapshotService.CombatPileSnapshot> targetPiles)
+        IReadOnlyList<CombatPileSnapshot> currentPiles,
+        IReadOnlyList<CombatPileSnapshot> targetPiles)
     {
         if (currentPiles.Count != targetPiles.Count)
             return false;
@@ -416,11 +430,22 @@ public static class MultiplayerInitialCombatPileSnapshotService
     }
 
     private static bool AreCardSnapshotsEquivalent(
-        CombatStateSnapshotService.CombatCardSnapshot currentCard,
-        CombatStateSnapshotService.CombatCardSnapshot targetCard)
+        CombatCardSnapshot currentCard,
+        CombatCardSnapshot targetCard)
     {
         if (!string.Equals(JsonSerializer.Serialize(currentCard.Card, JsonOptions), JsonSerializer.Serialize(targetCard.Card, JsonOptions), System.StringComparison.Ordinal))
             return false;
+
+        if (currentCard.HadDeckVersion != targetCard.HadDeckVersion)
+            return false;
+
+        if (!string.Equals(
+                JsonSerializer.Serialize(currentCard.DeckVersionCard, JsonOptions),
+                JsonSerializer.Serialize(targetCard.DeckVersionCard, JsonOptions),
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
 
         if (!Nullable.Equals(currentCard.Affliction, targetCard.Affliction))
             return false;
@@ -442,9 +467,65 @@ public static class MultiplayerInitialCombatPileSnapshotService
         return true;
     }
 
+    private static CardModel? ResolveDeckVersion(
+        RunState runState,
+        Player player,
+        CombatCardSnapshot cardSnapshot,
+        ISet<CardModel> usedDeckCards)
+    {
+        if (!cardSnapshot.HadDeckVersion && cardSnapshot.DeckVersionCard == null)
+            return null;
+
+        var desiredDeckCard = cardSnapshot.DeckVersionCard ?? cardSnapshot.Card;
+        var matchingDeckCard = player.Deck.Cards.FirstOrDefault(deckCard =>
+            !usedDeckCards.Contains(deckCard)
+            && MultiplayerSerializableCardStateService.MatchesDeckCardForRestore(deckCard.ToSerializable(), desiredDeckCard));
+        if (matchingDeckCard != null)
+        {
+            usedDeckCards.Add(matchingDeckCard);
+            return matchingDeckCard;
+        }
+
+        try
+        {
+            var restoredDeckCard = MultiplayerSerializableCardStateService.ResolveCardForRestore(
+                desiredDeckCard,
+                player);
+            var recreatedDeckCard = runState.LoadCard(restoredDeckCard, player);
+            player.Deck.AddInternal(recreatedDeckCard, -1, false);
+            usedDeckCards.Add(recreatedDeckCard);
+            return recreatedDeckCard;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to recreate missing deck version for multiplayer initial combat pile snapshot restore. " +
+                $"Player={player.NetId}, Card={desiredDeckCard.Id}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static void ApplyCardSnapshotState(CardModel card, CombatCardSnapshot cardSnapshot)
+    {
+        if (cardSnapshot.Affliction != null)
+        {
+            var affliction = ModelDb.GetById<AfflictionModel>(cardSnapshot.Affliction).ToMutable();
+            card.AfflictInternal(affliction, cardSnapshot.AfflictionCount);
+        }
+
+        if (cardSnapshot.Keywords == null)
+            return;
+
+        foreach (var keyword in cardSnapshot.Keywords)
+        {
+            if (!card.Keywords.Contains(keyword))
+                card.AddKeyword(keyword);
+        }
+    }
+
     private static void RegisterCardInCombatState(CardModel card)
     {
-        CombatStateAddCardMethod?.Invoke(card.Owner?.Creature.CombatState, [card]);
+        CombatStateAddCardMethod?.Invoke(CombatStateCompatibilityService.GetRawCombatState(card.Owner?.Creature), [card]);
     }
 
     private static void TryRefreshLocalCombatUi(RunState runState, CombatState combatState, string restoreContext)
@@ -515,14 +596,63 @@ public static class MultiplayerInitialCombatPileSnapshotService
 
     private sealed class MultiplayerCombatPileSnapshot
     {
+        public int SchemaVersion { get; set; }
         public string RoomScope { get; set; } = string.Empty;
-        public System.Collections.Generic.List<MultiplayerCombatPlayerPileSnapshot> Players { get; set; } = [];
+        public List<MultiplayerCombatPlayerPileSnapshot> Players { get; set; } = [];
     }
 
     private sealed class MultiplayerCombatPlayerPileSnapshot
     {
         public ulong PlayerId { get; set; }
-        public System.Collections.Generic.List<CombatStateSnapshotService.CombatPileSnapshot> Piles { get; set; } = [];
+        public List<CombatPileSnapshot> Piles { get; set; } = [];
+    }
+
+    private sealed class CombatPileSnapshot
+    {
+        public PileType PileType { get; set; }
+        public List<CombatCardSnapshot> Cards { get; set; } = [];
+
+        public static CombatPileSnapshot FromNetState(NetFullCombatState.CombatPileState state, Player? actualPlayer)
+        {
+            var actualPile = actualPlayer != null ? CardPile.Get(state.pileType, actualPlayer) : null;
+            var cards = new List<CombatCardSnapshot>();
+            for (var index = 0; index < state.cards.Count; index++)
+            {
+                var actualCard = actualPile != null && index < actualPile.Cards.Count
+                    ? actualPile.Cards[index]
+                    : null;
+                cards.Add(CombatCardSnapshot.FromNetState(state.cards[index], actualCard, actualPlayer));
+            }
+
+            return new CombatPileSnapshot
+            {
+                PileType = state.pileType,
+                Cards = cards
+            };
+        }
+    }
+
+    private sealed class CombatCardSnapshot
+    {
+        public SerializableCard Card { get; set; } = new();
+        public bool HadDeckVersion { get; set; }
+        public SerializableCard? DeckVersionCard { get; set; }
+        public ModelId? Affliction { get; set; }
+        public int AfflictionCount { get; set; }
+        public List<CardKeyword>? Keywords { get; set; }
+
+        public static CombatCardSnapshot FromNetState(NetFullCombatState.CardState state, CardModel? actualCard, Player? actualPlayer)
+        {
+            return new CombatCardSnapshot
+            {
+                Card = MultiplayerSerializableCardStateService.CaptureCombatCard(state.card, actualCard, actualPlayer),
+                HadDeckVersion = actualCard?.DeckVersion != null,
+                DeckVersionCard = MultiplayerSerializableCardStateService.CaptureLiveCard(actualCard?.DeckVersion),
+                Affliction = state.affliction,
+                AfflictionCount = state.afflictionCount,
+                Keywords = state.keywords?.ToList()
+            };
+        }
     }
 
     private sealed class PendingInitialDrawOverride
@@ -535,6 +665,6 @@ public static class MultiplayerInitialCombatPileSnapshotService
 
         public MultiplayerCombatPileSnapshot Snapshot { get; }
         public string RestoreContext { get; }
-        public System.Collections.Generic.HashSet<ulong> AppliedPlayerIds { get; } = [];
+        public HashSet<ulong> AppliedPlayerIds { get; } = [];
     }
 }

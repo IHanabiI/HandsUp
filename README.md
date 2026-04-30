@@ -1,44 +1,38 @@
-# Hands Up
+# HandsUp
 
-`Hands Up` (`举手手`) is a utility mod for Slay the Spire II.
+HandsUp 是一个以暂停菜单为入口的时空回退模组，包含单机回退功能与联机兼容逻辑。
 
-It adds a single `Hands Up` entry to the ESC menu and provides several rollback and restart tools for testing routes, replaying rooms, and recovering from mistakes during a run.
+当前公开版本：`v1.0.0`
 
-## Main features
+## 项目结构
 
-- Restart
-- Soft Restart
-- Return to Previous Floor
-- Return to Previous Step
+- `HandsUpCode/`：主要 C# 源码
+- `HandsUp/`：Godot 资源与模组图标
+- `tools/`：辅助脚本
+- `HandsUp.json`：模组清单
+- `HandsUp.csproj`：项目文件
+- `project.godot`：Godot 工程文件
 
-## Dependencies
+## 本地构建
 
-- BaseLib
+1. 安装 MegaDot / Godot 4.5.1 Mono
+2. 安装 .NET SDK
+3. 复制 `Directory.Build.props.example` 为 `Directory.Build.props`
+4. 按本机环境填写 `GodotPath`，必要时填写 `Sts2Path`
+5. 构建项目：
 
-This project depends on BaseLib and follows the Slay the Spire II modding workflow built around BaseLib, Harmony, Godot 4.5.1 Mono, and .NET 9.
+```powershell
+dotnet build HandsUp.sln
+```
 
-## Project structure
+## 注意事项
 
-- `HandsUpCode/`
-  Main source code for the mod.
-- `HandsUp/`
-  Mod assets.
-- `tools/`
-  Small helper scripts used during development.
+- `Directory.Build.props` 是本机本地配置，不建议上传到仓库。
+- `.godot/`、`bin/`、`obj/`、发布包和游戏安装目录文件不应进入源码仓库。
+- 联机测试时，双方必须使用相同版本的 `HandsUp` 与 `BaseLib`。
 
-## Local build requirements
+## 反馈
 
-To build this project locally, you need:
+如有问题，请抖音搜索 `IHanabiI`，找到作者后加群并录视频反馈。
 
-- Slay the Spire II
-- Godot 4.5.1 Mono
-- .NET 9 SDK
-- BaseLib
-
-The project uses `Sts2PathDiscovery.props` to detect the game install path automatically. If automatic detection does not work on your machine, create your own local build configuration instead of committing machine-specific paths into the repository.
-
-## Notes
-
-- This repository is the source project.
-- Release packages for end users should be distributed separately.
-- The current release line is `v0.1.0-beta`.
+本模组目前完全免费，不允许以任何形式盈利。

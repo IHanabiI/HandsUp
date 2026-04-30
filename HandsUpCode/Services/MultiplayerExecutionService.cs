@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
 using HandsUp.HandsUpCode.Multiplayer;
@@ -43,23 +44,32 @@ public static class MultiplayerExecutionService
 
     public static async Task ExecuteApprovedActionAsync(RaiseHandActionKind actionKind, string? runJson, string? roomJson, string? sourceRoomType, string? combatStateJson = null, string? restoreHint = null)
     {
-        switch (actionKind)
+        var actionLabel = RaiseHandActionService.GetActionLabel(actionKind);
+
+        try
         {
-            case RaiseHandActionKind.Restart:
-                await RestartCurrentMultiplayerRun(runJson);
-                break;
-            case RaiseHandActionKind.SoftRestart:
-                await ReloadCurrentMultiplayerRun(runJson, sourceRoomType, combatStateJson, restoreHint);
-                break;
-            case RaiseHandActionKind.PreviousFloor:
-                await ReloadPreviousFloorInMultiplayer(runJson);
-                break;
-            case RaiseHandActionKind.PreviousStep:
-                MainFile.Logger.Warn("Multiplayer previous-step execution is intentionally disabled. The action now only shows a popup and does not perform rollback.");
-                break;
-            default:
-                MainFile.Logger.Info($"Multiplayer execution for {actionKind} is not connected yet.");
-                break;
+            switch (actionKind)
+            {
+                case RaiseHandActionKind.Restart:
+                    await RestartCurrentMultiplayerRun(runJson);
+                    break;
+                case RaiseHandActionKind.SoftRestart:
+                    await ReloadCurrentMultiplayerRun(runJson, sourceRoomType, combatStateJson, restoreHint);
+                    break;
+                case RaiseHandActionKind.PreviousFloor:
+                    await ReloadPreviousFloorInMultiplayer(runJson);
+                    break;
+                case RaiseHandActionKind.PreviousStep:
+                    await ReloadPreviousCombatStepInMultiplayer(runJson, roomJson, sourceRoomType, combatStateJson, restoreHint);
+                    break;
+                default:
+                    MainFile.Logger.Info($"Multiplayer execution for {actionLabel} is not connected yet.");
+                    break;
+            }
+        }
+        finally
+        {
+            MultiplayerExecutionWindowService.CompleteExecutionWindow($"completed local execution for {actionLabel}");
         }
     }
 
@@ -99,6 +109,7 @@ public static class MultiplayerExecutionService
 
         try
         {
+            MultiplayerPreviousStepSnapshotService.ClearSnapshots("multiplayer restart resetting multiplayer previous-step history");
             MultiplayerPreviousFloorSnapshotService.ClearSnapshots("multiplayer restart resetting multiplayer previous-floor history");
             MultiplayerSoftRestartSnapshotService.ClearSnapshot("multiplayer restart resetting multiplayer soft-restart snapshot");
 
@@ -107,17 +118,26 @@ public static class MultiplayerExecutionService
                 await NGame.Instance.Transition.FadeOut(0.8f, "res://materials/transitions/fade_transition_mat.tres", null);
             }
 
-            DetachCurrentRunSceneBeforeReload();
             using (new NetLoadingHandle(netService))
             {
-                CleanUpRunForMultiplayerReload();
+                await PrepareCurrentMultiplayerRunForReload();
                 InitializeFreshMultiplayerRun(restartedRun, netService, serializableRun.DailyTime);
                 await PreloadManager.LoadRunAssets(restartedRun.Players.Select(player => player.Character));
                 await PreloadManager.LoadActAssets(restartedRun.Acts[0]);
                 await RunManager.Instance.FinalizeStartingRelics();
                 RunManager.Instance.Launch();
                 NGame.Instance.RootSceneContainer.SetCurrentScene(NRun.Create(restartedRun));
-                await RunManager.Instance.EnterAct(0, false);
+                MultiplayerExecutionWindowService.BeginCriticalCombatSyncAllowance(
+                    "multiplayer run restart entering Act 0");
+                try
+                {
+                    await RunManager.Instance.EnterAct(0, false);
+                }
+                finally
+                {
+                    MultiplayerExecutionWindowService.EndCriticalCombatSyncAllowance(
+                        "multiplayer run restart finished entering Act 0");
+                }
             }
 
             await NGame.Instance.Transition.FadeIn(0.8f, "res://materials/transitions/fade_transition_mat.tres", null);
@@ -130,6 +150,13 @@ public static class MultiplayerExecutionService
 
     private static async Task ReloadCurrentMultiplayerRun(string? runJson, string? sourceRoomType, string? combatStateJson, string? restoreHint)
     {
+        if (restoreHint == MultiplayerRunStartStageService.NeowRunStartRestoreHint)
+        {
+            MainFile.Logger.Info("Routing multiplayer reload through the Neow run-start restore path.");
+            await RestartCurrentMultiplayerRun(runJson);
+            return;
+        }
+
         var serializableRun = ParseSerializableRun(runJson, "soft restart");
         if (serializableRun == null)
             return;
@@ -148,6 +175,31 @@ public static class MultiplayerExecutionService
 
         MultiplayerPreviousFloorSnapshotService.DiscardLatestSnapshot("multiplayer previous-floor action consumed latest snapshot");
         await LoadMultiplayerRunIntoMapSelection(serializableRun);
+    }
+
+    private static async Task ReloadPreviousCombatStepInMultiplayer(
+        string? runJson,
+        string? roomJson,
+        string? sourceRoomType,
+        string? combatStateJson,
+        string? restoreHint)
+    {
+        var serializableRun = ParseSerializableRun(runJson, "previous step");
+        if (serializableRun == null)
+            return;
+
+        if (string.IsNullOrWhiteSpace(roomJson))
+        {
+            MainFile.Logger.Info("Routing multiplayer previous-step through the round-start soft-restart path because no explicit room snapshot payload was provided.");
+            await ReloadCurrentMultiplayerRun(runJson, sourceRoomType, combatStateJson, restoreHint);
+            return;
+        }
+
+        var roomSnapshot = ParseSerializableRoom(roomJson, "previous step");
+        if (roomSnapshot == null)
+            return;
+
+        await LoadMultiplayerRunIntoCurrentRoom(serializableRun, roomSnapshot, combatStateJson, restoreHint);
     }
 
     private static async Task ReloadMultiplayerRunWithDefaultLoad(SerializableRun serializableRun, string? sourceRoomType, string? combatStateJson, string? restoreHint)
@@ -171,8 +223,7 @@ public static class MultiplayerExecutionService
                 await NGame.Instance.Transition.FadeOut(0.8f, "res://materials/transitions/fade_transition_mat.tres", null);
             }
 
-            DetachCurrentRunSceneBeforeReload();
-            CleanUpRunForMultiplayerReload();
+            await PrepareCurrentMultiplayerRunForReload();
             RunManager.Instance.SetUpSavedMultiPlayer(runState, loadLobby);
 
             if (!string.IsNullOrWhiteSpace(combatStateJson))
@@ -181,7 +232,12 @@ public static class MultiplayerExecutionService
             if (TryCreateUnsupportedNonCombatRoomForLoad(serializableRun, sourceRoomType, runState, out var unsupportedRoom))
             {
                 MainFile.Logger.Info($"Using multiplayer custom room restore path for unsupported non-combat room {unsupportedRoom.RoomType}.");
-                await LoadMultiplayerRunIntoSpecificRoom(runState, unsupportedRoom, sourceRoomType, localSoftRestartSnapshot);
+                await LoadMultiplayerRunIntoSpecificRoom(
+                    runState,
+                    unsupportedRoom,
+                    sourceRoomType,
+                    localSoftRestartSnapshot,
+                    restoreHint);
             }
             else
             {
@@ -277,7 +333,8 @@ public static class MultiplayerExecutionService
         RunState runState,
         AbstractRoom room,
         string? sourceRoomType,
-        MultiplayerSoftRestartSnapshotService.MultiplayerSoftRestartSnapshot? localSoftRestartSnapshot)
+        MultiplayerSoftRestartSnapshotService.MultiplayerSoftRestartSnapshot? localSoftRestartSnapshot,
+        string? restoreHint)
     {
         await PreloadManager.LoadRunAssets(runState.Players.Select(player => player.Character));
         await PreloadManager.LoadActAssets(runState.Act);
@@ -285,6 +342,7 @@ public static class MultiplayerExecutionService
         RunManager.Instance.Launch();
         NGame.Instance.RootSceneContainer.SetCurrentScene(NRun.Create(runState));
         await RunManager.Instance.GenerateMap();
+        TryAppendMissingMapPointHistoryForSpecificRoomRestore(runState, room, restoreHint);
         await RunManager.Instance.LoadIntoLatestMapCoord(room);
         TryApplyTreasureRewardSnapshot(runState, room, sourceRoomType, localSoftRestartSnapshot);
 
@@ -292,6 +350,98 @@ public static class MultiplayerExecutionService
         {
             NRun.Instance.GlobalUi.MapScreen.Drawings.LoadDrawings(RunManager.Instance.MapDrawingsToLoad);
             RunManager.Instance.MapDrawingsToLoad = null;
+        }
+    }
+
+    private static void TryAppendMissingMapPointHistoryForSpecificRoomRestore(
+        RunState runState,
+        AbstractRoom room,
+        string? restoreHint)
+    {
+        var visitedCoordCount = runState.VisitedMapCoords.Count;
+        var currentActHistoryCount = runState.MapPointHistory.Count > runState.CurrentActIndex
+            ? runState.MapPointHistory[runState.CurrentActIndex].Count
+            : 0;
+        if (visitedCoordCount == 0 || currentActHistoryCount >= visitedCoordCount)
+            return;
+
+        var currentMapPoint = runState.CurrentMapPoint;
+        if (currentMapPoint == null)
+        {
+            MainFile.Logger.Warn(
+                $"Unable to rehydrate multiplayer map-point history before restoring unsupported non-combat room {room.RoomType}. " +
+                $"RestoreHint={restoreHint ?? string.Empty}");
+            return;
+        }
+
+        MainFile.Logger.Info(
+            $"Rehydrating multiplayer map-point history before restoring unsupported non-combat room {room.RoomType}. " +
+            $"RestoreHint={restoreHint ?? string.Empty} MapPointType={currentMapPoint.PointType} " +
+            $"HistoryCount={currentActHistoryCount} VisitedCoords={visitedCoordCount}");
+        runState.AppendToMapPointHistory(currentMapPoint.PointType, room.RoomType, room.ModelId);
+    }
+
+    private static async Task LoadMultiplayerRunIntoCurrentRoom(
+        SerializableRun serializableRun,
+        SerializableRoom roomSnapshot,
+        string? combatStateJson,
+        string? restoreHint)
+    {
+        var runState = RunState.FromSerializable(serializableRun);
+        var loadLobby = CreateLoadLobby(serializableRun);
+        if (loadLobby == null)
+            return;
+
+        try
+        {
+            var snapshotApplied = false;
+
+            if (NGame.Instance.CurrentRunNode != null)
+            {
+                await NGame.Instance.Transition.FadeOut(0.8f, "res://materials/transitions/fade_transition_mat.tres", null);
+            }
+
+            await PrepareCurrentMultiplayerRunForReload();
+            RunManager.Instance.SetUpSavedMultiPlayer(runState, loadLobby);
+            await PreloadManager.LoadRunAssets(runState.Players.Select(player => player.Character));
+            await PreloadManager.LoadActAssets(runState.Act);
+
+            RunManager.Instance.Launch();
+            NGame.Instance.RootSceneContainer.SetCurrentScene(NRun.Create(runState));
+            await RunManager.Instance.GenerateMap();
+
+            var restoredRoom = CreateRoomFromPreviousStepSnapshot(roomSnapshot, runState);
+            try
+            {
+                MultiplayerPreviousStepRestoreStateService.BeginRestore(
+                    MultiplayerPreviousStepRestoreStateService.RestoreMode.MidCombatSnapshot);
+                MultiplayerSoftRestartSnapshotService.SuppressNextSnapshotForRoom(runState, restoredRoom);
+                await RunManager.Instance.LoadIntoLatestMapCoord(restoredRoom);
+                snapshotApplied = await MultiplayerCombatStateSnapshotService.TryApplyCombatStateJsonAsync(
+                    combatStateJson,
+                    runState,
+                    string.IsNullOrWhiteSpace(restoreHint) ? "multiplayer previous step" : restoreHint);
+            }
+            finally
+            {
+                MultiplayerPreviousStepRestoreStateService.EndRestore();
+                if (snapshotApplied)
+                {
+                    var releaseReason = string.IsNullOrWhiteSpace(restoreHint)
+                        ? "multiplayer previous-step restore became action-ready"
+                        : $"{restoreHint} became action-ready";
+                    MultiplayerExecutionWindowService.ReleaseActionSuppression(releaseReason);
+                }
+            }
+
+            await MultiplayerCombatStateSnapshotService.TryRefreshCurrentEnemyIntentDisplaysAsync(
+                runState,
+                string.IsNullOrWhiteSpace(restoreHint) ? "multiplayer previous step/final intent refresh" : $"{restoreHint}/final intent refresh");
+            await NGame.Instance.Transition.FadeIn(0.8f, "res://materials/transitions/fade_transition_mat.tres", null);
+        }
+        finally
+        {
+            loadLobby.CleanUp(false);
         }
     }
 
@@ -329,8 +479,7 @@ public static class MultiplayerExecutionService
                 await NGame.Instance.Transition.FadeOut(0.8f, "res://materials/transitions/fade_transition_mat.tres", null);
             }
 
-            DetachCurrentRunSceneBeforeReload();
-            CleanUpRunForMultiplayerReload();
+            await PrepareCurrentMultiplayerRunForReload();
             RunManager.Instance.SetUpSavedMultiPlayer(runState, loadLobby);
             await PreloadManager.LoadRunAssets(runState.Players.Select(player => player.Character));
             await PreloadManager.LoadActAssets(runState.Act);
@@ -402,6 +551,25 @@ public static class MultiplayerExecutionService
         return readResult.SaveData;
     }
 
+    private static SerializableRoom? ParseSerializableRoom(string? roomJson, string actionLabel)
+    {
+        if (string.IsNullOrWhiteSpace(roomJson))
+        {
+            MainFile.Logger.Warn($"Multiplayer {actionLabel} skipped because no serialized room payload was provided.");
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<SerializableRoom>(roomJson);
+        }
+        catch (JsonException e)
+        {
+            MainFile.Logger.Warn($"Multiplayer {actionLabel} skipped because the serialized room payload could not be parsed: {e.Message}");
+            return null;
+        }
+    }
+
     private static GameMode DeriveGameMode(SerializableRun serializableRun)
     {
         if (serializableRun.DailyTime != null)
@@ -410,7 +578,22 @@ public static class MultiplayerExecutionService
         return serializableRun.Modifiers.Count > 0 ? GameMode.Custom : GameMode.Standard;
     }
 
-    private static void DetachCurrentRunSceneBeforeReload()
+    private static async Task PrepareCurrentMultiplayerRunForReload()
+    {
+        var detachedRun = NGame.Instance.CurrentRunNode;
+        if (detachedRun != null)
+            MultiplayerReloadSceneDetachGuardService.ArmForDetachedRun(detachedRun, "preparing multiplayer reload");
+
+        CleanUpRunForMultiplayerReload();
+        DetachCurrentRunSceneForReload();
+
+        if (detachedRun == null)
+            return;
+
+        await WaitForDetachedRunSceneExitAsync(detachedRun);
+    }
+
+    private static void DetachCurrentRunSceneForReload()
     {
         var rootSceneContainer = NGame.Instance.RootSceneContainer;
         if (rootSceneContainer.CurrentScene == null)
@@ -450,8 +633,44 @@ public static class MultiplayerExecutionService
         runManager.FlavorSynchronizer.Dispose();
         runManager.ChecksumTracker.Dispose();
         runManager.RunLobby?.Dispose();
+        MultiplayerPreviousStepRestoreStateService.Clear();
         LocalContext.NetId = null;
         StateProperty?.SetValue(runManager, null);
+    }
+
+    private static async Task WaitForDetachedRunSceneExitAsync(NRun detachedRun)
+    {
+        const int MaxFramesToWait = 8;
+
+        if (!GodotObject.IsInstanceValid(detachedRun))
+            return;
+
+        var detachedRunId = detachedRun.GetInstanceId();
+        for (var frame = 1; frame <= MaxFramesToWait; frame++)
+        {
+            await NGame.Instance.ToSignal(NGame.Instance.GetTree(), SceneTree.SignalName.ProcessFrame);
+
+            if (!GodotObject.IsInstanceValid(detachedRun))
+            {
+                MultiplayerReloadSceneDetachGuardService.Release(detachedRunId,
+                    $"detached multiplayer run scene exited after {frame} frame(s)");
+                return;
+            }
+        }
+
+        MainFile.Logger.Warn(
+            $"Detached multiplayer run scene {detachedRunId} was still alive after {MaxFramesToWait} frame(s); keeping cleanup suppression armed until the scene is deleted.");
+    }
+
+    private static AbstractRoom CreateRoomFromPreviousStepSnapshot(SerializableRoom roomSnapshot, RunState runState)
+    {
+        return roomSnapshot.RoomType switch
+        {
+            RoomType.Shop => new MerchantRoom(),
+            RoomType.RestSite => new RestSiteRoom(),
+            RoomType.Treasure => new TreasureRoom(runState.CurrentActIndex),
+            _ => AbstractRoom.FromSerializable(roomSnapshot, runState)
+        };
     }
 
     private sealed class NoOpLoadRunLobbyListener : ILoadRunLobbyListener

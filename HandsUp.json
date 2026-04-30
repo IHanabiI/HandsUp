@@ -3,7 +3,7 @@
   "name": "\u4e3e\u624b\u624b",
   "author": "Hanabi",
   "description": "\u4e00\u4e2a\u4ee5\u4e3e\u624b\u624b\u4e3a\u5165\u53e3\u7684\u65f6\u7a7a\u56de\u9000\u6a21\u7ec4\u3002",
-  "version": "v0.1.0-beta",
+  "version": "v1.0.0",
   "has_pck": true,
   "has_dll": true,
   "dependencies": ["BaseLib"],

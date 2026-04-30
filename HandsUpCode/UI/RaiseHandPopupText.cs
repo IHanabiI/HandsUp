@@ -14,4 +14,6 @@ public static class RaiseHandPopupText
     public const string NoWayBackStepBodyText = "[center]\u5df2\u7ecf\u56de\u5230\u6700\u521d\u7684\u6837\u5b50\u4e86[/center]\n[center]\u8fd9\u6b21\u4e00\u5b9a\u8981\u627e\u5230\u6700\u5b8c\u7f8e\u7684\u65f6\u95f4\u7ebf[/center]";
     public const string CombatFinishedStepTitleText = "\u6218\u6597\u5df2\u7ed3\u675f";
     public const string CombatFinishedStepBodyText = "[center]\u89c9\u5f97\u8fd8\u6709\u64cd\u4f5c\u6ca1\u6253\u51fa\u6765\uff1f[/center]\n[center]\u8bd5\u8bd5\u522b\u7684\u9b54\u6cd5\u5427[/center]\n[center]\u53bb\u5bfb\u627e\u6700\u5b8c\u7f8e\u7684\u65f6\u95f4\u7ebf[/center]";
+    public const string ApprovalStateChangedTitleText = "\u795e\u79d8\u529b\u91cf\u6d88\u6563\u4e86";
+    public const string ApprovalStateChangedBodyText = "[center]\u961f\u53cb\u8fd8\u5728\u601d\u8003\u7684\u65f6\u5019[/center]\n[center]\u8fd9\u6761\u65f6\u95f4\u7ebf\u5df2\u7ecf\u7ee7\u7eed\u524d\u8fdb[/center]\n[center]\u8bf7\u5728\u65b0\u7684\u72b6\u6001\u4e0b\u91cd\u65b0\u53d1\u8d77[/center]\n[center]\u795e\u79d8\u529b\u91cf\u6d88\u6563\u4e86[/center]";
 }

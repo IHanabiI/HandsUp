@@ -13,21 +13,21 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
-using MegaCrit.Sts2.Core.Entities.Orbs;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.UI;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Monsters;
 using MegaCrit.Sts2.Core.Models.Powers;
-using MegaCrit.Sts2.Core.Multiplayer.Replay;
-using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
+using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Vfx;
 using MegaCrit.Sts2.Core.Nodes.Vfx.Backgrounds;
+using MegaCrit.Sts2.Core.Platform;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
@@ -35,7 +35,7 @@ using MegaCrit.Sts2.Core.Saves.Runs;
 
 namespace HandsUp.HandsUpCode.Services;
 
-public static class SingleplayerCombatStateSnapshotService
+public static partial class MultiplayerCombatStateSnapshotService
 {
     private const int CombatReadyTimeoutMs = 5000;
     private const int CombatReadyPollIntervalMs = 15;
@@ -48,17 +48,17 @@ public static class SingleplayerCombatStateSnapshotService
     private const string DoormakerFaceVisualPath = "monsters/beta/door_maker_placeholder_2.png";
     private const string DoormakerTeethVisualPath = "monsters/beta/door_maker_placeholder_3.png";
     private const string DoormakerHandsVisualPath = "monsters/beta/door_maker_placeholder_4.png";
+    private const string KnowledgeDemonPonderMoveId = "PONDER_MOVE";
+    private const string KnowledgeDemonIdleLoopAnimationId = "idle_loop";
+    private const string KnowledgeDemonBurntLoopAnimationId = "burnt_loop";
+    private const string KnowledgeDemonBurningStartMethod = "OnBurningStart";
+    private const string KnowledgeDemonBurningEndMethod = "OnBurningEnd";
     private const string OwlMagistrateVerdictMoveId = "VERDICT";
     private const string OwlMagistrateTakeOffTrigger = "TakeOff";
     private const string OwlMagistrateFlyLoopAnimationId = "fly_loop";
     private const string OwlMagistrateFlyingBoundsContainer = "FlyingBounds";
     private const string RocketLaserMoveId = "LASER_MOVE";
     private const string RocketRechargeMoveId = "RECHARGE_MOVE";
-    private const string KnowledgeDemonPonderMoveId = "PONDER_MOVE";
-    private const string KnowledgeDemonIdleLoopAnimationId = "idle_loop";
-    private const string KnowledgeDemonBurntLoopAnimationId = "burnt_loop";
-    private const string KnowledgeDemonBurningStartMethod = "OnBurningStart";
-    private const string KnowledgeDemonBurningEndMethod = "OnBurningEnd";
     private const string TestSubjectRespawnMoveId = "RESPAWN_MOVE";
     private const string TestSubjectIdleLoop1AnimationId = "idle_loop1";
     private const string TestSubjectIdleLoop2AnimationId = "idle_loop2";
@@ -68,23 +68,14 @@ public static class SingleplayerCombatStateSnapshotService
     private const string TestSubjectDieAnimationId = "die";
     private const int KaiserCrabRightArmTrack = 2;
 
-    private static readonly MethodInfo? CombatStateAddCardMethod = typeof(CombatState)
-        .GetMethod("AddCard", BindingFlags.Instance | BindingFlags.NonPublic, [typeof(CardModel)]);
-    private static readonly MethodInfo? HandOnCombatStateChangedMethod = typeof(NPlayerHand)
-        .GetMethod("OnCombatStateChanged", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? HandCanPlayCardsMethod = typeof(NPlayerHand)
         .GetMethod("CanPlayCards", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? HandAreCardActionsAllowedMethod = typeof(NPlayerHand)
         .GetMethod("AreCardActionsAllowed", BindingFlags.Instance | BindingFlags.NonPublic);
-    private static readonly MethodInfo? EndTurnButtonOnTurnStartedMethod = typeof(NEndTurnButton)
-        .GetMethod("OnTurnStarted", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? MoveStateMachineCurrentStateField = typeof(MonsterMoveStateMachine)
         .GetField("_currentState", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? MoveStateMachinePerformedFirstMoveField = typeof(MonsterMoveStateMachine)
         .GetField("_performedFirstMove", BindingFlags.Instance | BindingFlags.NonPublic);
-    private static readonly MethodInfo? CombatReplayWriterRecordInitialStateMethod = typeof(CombatReplayWriter)
-        .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-        .FirstOrDefault(method => method.Name == "RecordInitialState" && method.GetParameters().Length == 1);
     private static readonly MethodInfo? SandpitPowerUpdateCreaturePositionsMethod = typeof(SandpitPower)
         .GetMethod("UpdateCreaturePositions", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? SurroundedPowerFaceDirectionMethod = typeof(SurroundedPower)
@@ -120,6 +111,8 @@ public static class SingleplayerCombatStateSnapshotService
         .GetProperty("EndingPlayerTurnPhaseOne", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
     private static readonly PropertyInfo? CombatManagerEndingPlayerTurnPhaseTwoProperty = typeof(CombatManager)
         .GetProperty("EndingPlayerTurnPhaseTwo", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly PropertyInfo? TenderPowerCardsPlayedThisTurnProperty = typeof(TenderPower)
+        .GetProperty("CardsPlayedThisTurn", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? CombatManagerIsPlayPhaseField = typeof(CombatManager)
         .GetField("<IsPlayPhase>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)
         ?? typeof(CombatManager).GetField("_isPlayPhase", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -132,157 +125,12 @@ public static class SingleplayerCombatStateSnapshotService
     private static readonly FieldInfo? CombatManagerEndingPlayerTurnPhaseTwoField = typeof(CombatManager)
         .GetField("<EndingPlayerTurnPhaseTwo>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)
         ?? typeof(CombatManager).GetField("_endingPlayerTurnPhaseTwo", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? TenderPowerCardsPlayedThisTurnField = typeof(TenderPower)
+        .GetField("_cardsPlayedThisTurn", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? PowerModelInternalDataField = typeof(PowerModel)
+        .GetField("_internalData", BindingFlags.Instance | BindingFlags.NonPublic);
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = false
-    };
-
-    public static string? CaptureCurrentCombatStateJson(RunState? runState)
-    {
-        if (runState?.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
-            return null;
-
-        var snapshot = CombatStateSnapshot.FromCurrentRun(runState);
-        return JsonSerializer.Serialize(snapshot, JsonOptions);
-    }
-
-    public static async Task<bool> TryApplyCombatStateJsonAsync(string? combatStateJson, RunState runState, string restoreContext)
-    {
-        if (string.IsNullOrWhiteSpace(combatStateJson))
-            return false;
-
-        CombatStateSnapshot? snapshot;
-        try
-        {
-            snapshot = JsonSerializer.Deserialize<CombatStateSnapshot>(combatStateJson, JsonOptions);
-        }
-        catch (Exception e)
-        {
-            MainFile.Logger.Warn($"Failed to parse singleplayer combat snapshot for {restoreContext}: {e.Message}");
-            return false;
-        }
-
-        if (snapshot == null)
-            return false;
-
-        var readyContext = await WaitForCombatReadyAsync(runState, restoreContext);
-        if (readyContext == null)
-        {
-            MainFile.Logger.Warn($"Skipped applying singleplayer combat snapshot for {restoreContext} because combat was not ready.");
-            return false;
-        }
-
-        var combatState = readyContext.Value.CombatState;
-        var combatRoom = readyContext.Value.CombatRoom;
-
-        runState.Rng.LoadFromSerializable(snapshot.Rng);
-        RunManager.Instance.PlayerChoiceSynchronizer.FastForwardChoiceIds(snapshot.NextChoiceIds);
-
-        if (snapshot.LastExecutedActionId.HasValue)
-            RunManager.Instance.ActionQueueSet.FastForwardNextActionId(snapshot.LastExecutedActionId.Value + 1);
-
-        if (snapshot.LastExecutedHookId.HasValue)
-            RunManager.Instance.ActionQueueSynchronizer.FastForwardHookId(snapshot.LastExecutedHookId.Value + 1);
-
-        combatState.RoundNumber = snapshot.RoundNumber;
-        combatState.CurrentSide = snapshot.CurrentSide;
-
-        await EnsureSnapshotCreaturesExistAsync(combatState, snapshot, restoreContext);
-        var resolutionContext = BuildSnapshotResolutionContext(combatState, snapshot.Creatures);
-        RestoreCreatureStates(combatState, snapshot.Creatures, resolutionContext);
-        RemoveCreaturesMissingFromSnapshot(combatState, snapshot, restoreContext, resolutionContext);
-        RestorePlayerStates(runState, snapshot.Players);
-        LogKaiserCrabRocketRestoreDebug(combatState, snapshot.Creatures, restoreContext, "after-restore-creature-states");
-        await RestoreCreatureExtrasAsync(combatState, snapshot.Creatures, restoreContext, resolutionContext);
-        LogKaiserCrabRocketRestoreDebug(combatState, snapshot.Creatures, restoreContext, "after-restore-creature-extras");
-        RestorePowerExtras(runState, combatState, snapshot.Creatures, restoreContext, resolutionContext);
-        LogKaiserCrabRocketRestoreDebug(combatState, snapshot.Creatures, restoreContext, "after-restore-power-extras");
-
-        CombatManager.Instance.StateTracker.SetState(combatState);
-        RestoreCombatManagerState(snapshot.CombatManager, restoreContext);
-        await ReconcileCombatRoomCreatureNodes(combatState, snapshot.Creatures, restoreContext, resolutionContext);
-        ReinitializeCombatReplayWriter(restoreContext);
-        TryRefreshLocalCombatUi(runState, combatState, snapshot.RoundNumber, restoreContext);
-        await TryRefreshLocalCombatUiAfterDelayAsync(runState, combatRoom, combatState, snapshot.RoundNumber, restoreContext);
-        await SynchronizePostRestoreSpecialPowerStateAsync(combatState, snapshot.Creatures, restoreContext, resolutionContext);
-        LogKaiserCrabRocketRestoreDebug(combatState, snapshot.Creatures, restoreContext, "after-post-restore-power-sync");
-        RestoreHiddenLiveAllyVisuals(combatState, restoreContext);
-
-        foreach (var player in combatState.Players)
-            player.PlayerCombatState?.RecalculateCardValues();
-
-        MainFile.Logger.Info($"Applied singleplayer combat snapshot for {restoreContext}.");
-        return true;
-    }
-
-    private static async Task EnsureSnapshotCreaturesExistAsync(CombatState combatState, CombatStateSnapshot snapshot, string restoreContext)
-    {
-        var resolvedCreatures = new HashSet<Creature>();
-        var recreatedCreatures = new List<string>();
-
-        foreach (var creatureSnapshot in snapshot.Creatures.Where(creature => creature.PlayerId == null))
-        {
-            var existingCreature = ResolveCreature(combatState, creatureSnapshot, resolvedCreatures);
-            if (existingCreature != null)
-            {
-                resolvedCreatures.Add(existingCreature);
-                continue;
-            }
-
-            if (string.IsNullOrWhiteSpace(creatureSnapshot.MonsterId))
-                continue;
-
-            try
-            {
-                var monster = SaveUtil.MonsterOrDeprecated(new ModelId("MONSTER", creatureSnapshot.MonsterId)).ToMutable();
-                var recreatedCreature = await CreatureCmd.Add(monster, combatState, CombatSide.Enemy, creatureSnapshot.SlotName);
-                resolvedCreatures.Add(recreatedCreature);
-                recreatedCreatures.Add(DescribeSnapshotCreatureForLog(creatureSnapshot));
-            }
-            catch (Exception e)
-            {
-                MainFile.Logger.Warn(
-                    $"Failed to recreate creature missing from singleplayer combat snapshot for {restoreContext}. " +
-                    $"Monster={creatureSnapshot.MonsterId}, Slot={creatureSnapshot.SlotName ?? "unknown"}: {e.Message}");
-            }
-        }
-
-        if (recreatedCreatures.Count == 0)
-            return;
-
-        if (snapshot.EncounterSlots.Count > 0)
-            combatState.SortEnemiesBySlotName();
-
-        MainFile.Logger.Info(
-            $"Recreated {recreatedCreatures.Count} creature(s) missing from singleplayer combat snapshot for {restoreContext}: " +
-            $"{string.Join(", ", recreatedCreatures)}");
-    }
-
-    private static async Task<ReadySingleplayerCombatRestoreContext?> WaitForCombatReadyAsync(RunState runState, string restoreContext)
-    {
-        if (runState.CurrentRoom is not CombatRoom)
-            return null;
-
-        if (TryGetReadyRestoreContext(runState, out var readyContext))
-            return readyContext;
-
-        var startedAt = Time.GetTicksMsec();
-        while (Time.GetTicksMsec() - startedAt < CombatReadyTimeoutMs)
-        {
-            await Task.Delay(CombatReadyPollIntervalMs);
-            if (TryGetReadyRestoreContext(runState, out readyContext))
-            {
-                MainFile.Logger.Info($"Singleplayer combat restore became UI-ready after {Time.GetTicksMsec() - startedAt} ms for {restoreContext}.");
-                return readyContext;
-            }
-        }
-
-        MainFile.Logger.Warn($"Timed out while waiting for singleplayer combat UI readiness before applying snapshot for {restoreContext}.");
-        return TryGetReadyRestoreContext(runState, out readyContext) ? readyContext : null;
-    }
-
-    private static bool TryGetReadyRestoreContext(RunState runState, out ReadySingleplayerCombatRestoreContext readyContext)
+    private static bool TryGetReadyRestoreContext(RunState runState, out ReadyMultiplayerCombatRestoreContext readyContext)
     {
         readyContext = default;
 
@@ -304,13 +152,57 @@ public static class SingleplayerCombatStateSnapshotService
             return false;
         }
 
-        readyContext = new ReadySingleplayerCombatRestoreContext(combatRoom, combatState);
+        readyContext = new ReadyMultiplayerCombatRestoreContext(combatRoom, combatState);
         return true;
+    }
+
+    private static async Task EnsureSnapshotCreaturesExistAsync(CombatState combatState, CombatStateSnapshot snapshot, string restoreContext)
+    {
+        var resolvedCreatures = new HashSet<Creature>();
+        var recreatedCreatures = new List<string>();
+
+        foreach (var creatureSnapshot in snapshot.Creatures.Where(creature => creature.PlayerId == null))
+        {
+            var existingCreature = ResolveCreature(combatState, creatureSnapshot, resolvedCreatures);
+            if (existingCreature != null)
+            {
+                resolvedCreatures.Add(existingCreature);
+                continue;
+            }
+
+            if (creatureSnapshot.MonsterId == null)
+                continue;
+
+            try
+            {
+                var monster = SaveUtil.MonsterOrDeprecated(creatureSnapshot.MonsterId).ToMutable();
+                var recreatedCreature = await CreatureCmd.Add(monster, combatState, CombatSide.Enemy, creatureSnapshot.SlotName);
+                resolvedCreatures.Add(recreatedCreature);
+                recreatedCreatures.Add(DescribeSnapshotCreatureForLog(creatureSnapshot));
+            }
+            catch (Exception e)
+            {
+                MainFile.Logger.Warn(
+                    $"Failed to recreate creature missing from multiplayer combat snapshot for {restoreContext}. " +
+                    $"Monster={creatureSnapshot.MonsterId?.Entry ?? "unknown"}, Slot={creatureSnapshot.SlotName ?? "unknown"}: {e.Message}");
+            }
+        }
+
+        if (recreatedCreatures.Count == 0)
+            return;
+
+        if (snapshot.EncounterSlots.Count > 0)
+            combatState.SortEnemiesBySlotName();
+
+        MainFile.Logger.Info(
+            $"Recreated {recreatedCreatures.Count} creature(s) missing from multiplayer combat snapshot for {restoreContext}: " +
+            $"{string.Join(", ", recreatedCreatures)}");
     }
 
     private static void RestoreCreatureStates(
         CombatState combatState,
         IReadOnlyList<CombatCreatureSnapshot> snapshots,
+        string restoreContext,
         SnapshotResolutionContext resolutionContext)
     {
         foreach (var snapshot in snapshots)
@@ -319,8 +211,8 @@ public static class SingleplayerCombatStateSnapshotService
             if (creature == null)
             {
                 MainFile.Logger.Warn(
-                    $"Skipped singleplayer combat creature snapshot restore because the target creature could not be resolved. " +
-                    $"Monster={snapshot.MonsterId}, Index={snapshot.MonsterInstanceIndex}, Slot={snapshot.SlotName}, Player={snapshot.PlayerId}");
+                    $"Skipped multiplayer combat creature snapshot restore because the target creature could not be resolved. " +
+                    $"Monster={snapshot.MonsterId?.Entry ?? "unknown"}, Index={snapshot.MonsterInstanceIndex}, Slot={snapshot.SlotName}, Player={snapshot.PlayerId}");
                 continue;
             }
 
@@ -338,127 +230,45 @@ public static class SingleplayerCombatStateSnapshotService
                 try
                 {
                     var power = ModelDb.GetById<PowerModel>(powerSnapshot.Id).ToMutable();
+                    PrimeGremlinMercThieveryTargetBeforeApply(creature, power, powerSnapshot, combatState, restoreContext);
                     power.ApplyInternal(creature, powerSnapshot.Amount, true);
                 }
                 catch (Exception e)
                 {
-                    MainFile.Logger.Warn($"Skipped restoring singleplayer power {powerSnapshot.Id} x{powerSnapshot.Amount} for creature {(snapshot.PlayerId?.ToString() ?? snapshot.MonsterId ?? "unknown")} because restore failed: {e.Message}");
+                    MainFile.Logger.Warn(
+                        $"Skipped restoring multiplayer power {powerSnapshot.Id} x{powerSnapshot.Amount} for creature " +
+                        $"{(snapshot.PlayerId?.ToString() ?? snapshot.MonsterId?.Entry ?? "unknown")} because restore failed: {e.Message}");
                 }
             }
         }
     }
 
-    private static void RemoveCreaturesMissingFromSnapshot(
+    private static void PrimeGremlinMercThieveryTargetBeforeApply(
+        Creature creature,
+        PowerModel power,
+        CombatPowerSnapshot powerSnapshot,
         CombatState combatState,
-        CombatStateSnapshot snapshot,
-        string restoreContext,
-        SnapshotResolutionContext resolutionContext)
+        string restoreContext)
     {
-        var snapshotEnemyCount = snapshot.Creatures.Count(creature => creature.PlayerId == null);
-        var currentEnemyCreatures = combatState.Creatures
-            .Where(creature => creature.Player == null)
-            .ToList();
-
-        if (snapshotEnemyCount >= currentEnemyCreatures.Count)
-            return;
-
-        var matchedEnemies = ResolveMatchedSnapshotEnemies(combatState, snapshot.Creatures, resolutionContext);
-        var matchedEnemySet = matchedEnemies.ToHashSet();
-        var extraCreatures = currentEnemyCreatures
-            .Where(creature => !matchedEnemySet.Contains(creature))
-            .ToList();
-
-        if (extraCreatures.Count == 0)
-            return;
-
-        foreach (var creature in extraCreatures)
-            RemoveCreatureFromCombatState(combatState, creature, restoreContext);
-
-        if (snapshot.EncounterSlots.Count > 0)
-            combatState.SortEnemiesBySlotName();
-        MainFile.Logger.Info(
-            $"Removed {extraCreatures.Count} creature(s) missing from singleplayer combat snapshot for {restoreContext}: " +
-            $"{string.Join(", ", extraCreatures.Select(DescribeCreatureForLog))}");
-    }
-
-    private static List<Creature> ResolveMatchedSnapshotEnemies(
-        CombatState combatState,
-        IReadOnlyList<CombatCreatureSnapshot> snapshots,
-        SnapshotResolutionContext resolutionContext)
-    {
-        var matchedCreatures = new List<Creature>();
-        var usedCreatures = new HashSet<Creature>();
-
-        foreach (var snapshot in snapshots.Where(snapshot => snapshot.PlayerId == null))
+        if (creature.Monster is not GremlinMerc
+            || power is not ThieveryPower thieveryPower
+            || !powerSnapshot.TargetPlayerId.HasValue)
         {
-            var creature = ResolveCreature(combatState, snapshot, resolutionContext, usedCreatures);
-            if (creature == null)
-                continue;
-
-            matchedCreatures.Add(creature);
-            usedCreatures.Add(creature);
+            return;
         }
 
-        return matchedCreatures;
-    }
-
-    private static string DescribeCreatureForLog(Creature creature)
-    {
-        var monsterId = creature.Monster?.Id.Entry ?? "unknown";
-        return string.IsNullOrWhiteSpace(creature.SlotName)
-            ? monsterId
-            : $"{monsterId}:{creature.SlotName}";
-    }
-
-    private static string DescribeSnapshotCreatureForLog(CombatCreatureSnapshot snapshot)
-    {
-        var monsterId = snapshot.MonsterId ?? "unknown";
-        return string.IsNullOrWhiteSpace(snapshot.SlotName)
-            ? monsterId
-            : $"{monsterId}:{snapshot.SlotName}";
-    }
-
-    private static void RemoveCreatureFromCombatState(CombatState combatState, Creature creature, string restoreContext)
-    {
-        try
-        {
-            CombatManager.Instance.RemoveCreature(creature);
-            if (CombatStateCompatibilityService.BelongsToCombatState(creature, combatState))
-                combatState.RemoveCreature(creature, true);
-        }
-        catch (Exception e)
+        var targetPlayer = combatState.RunState?.GetPlayer(powerSnapshot.TargetPlayerId.Value);
+        if (targetPlayer?.Creature == null)
         {
             MainFile.Logger.Warn(
-                $"Failed to fully remove creature during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Monster={creature.Monster?.Id.Entry ?? "unknown"}, Slot={creature.SlotName ?? "unknown"}: {e.Message}");
+                $"Skipped priming thievery target before multiplayer power restore for {restoreContext} " +
+                $"because player {powerSnapshot.TargetPlayerId.Value} was not found.");
+            return;
         }
-    }
 
-    private static void RestorePlayerStates(RunState runState, IReadOnlyList<CombatPlayerSnapshot> snapshots)
-    {
-        foreach (var snapshot in snapshots)
-        {
-            var player = runState.GetPlayer(snapshot.PlayerId);
-            if (player == null)
-            {
-                MainFile.Logger.Warn($"Skipped singleplayer combat player snapshot restore because player {snapshot.PlayerId} was not found.");
-                continue;
-            }
-
-            player.PlayerRng.LoadFromSerializable(snapshot.RngSet);
-            player.PlayerOdds.LoadFromSerializable(snapshot.OddsSet);
-            player.RelicGrabBag.LoadFromSerializable(snapshot.RelicGrabBag);
-            player.Gold = snapshot.Gold;
-
-            var combat = player.PlayerCombatState;
-            if (combat == null)
-                continue;
-
-            combat.Energy = snapshot.Energy;
-            combat.Stars = snapshot.Stars;
-            RestorePlayerPiles(runState, player, snapshot.Piles);
-            RestorePlayerOrbs(combat, snapshot.Orbs);
-        }
+        // Gremlin Merc's thievery powers are visibility-gated by Target. Set it before ApplyInternal
+        // so the local power container only creates the single player-specific icon that should exist.
+        thieveryPower.Target = targetPlayer.Creature;
     }
 
     private static async Task RestoreCreatureExtrasAsync(
@@ -486,9 +296,7 @@ public static class SingleplayerCombatStateSnapshotService
             if (await TryRestoreIllusionReviveMoveStateAsync(creature, snapshot, restoreContext))
             {
                 foreach (var fieldSnapshot in snapshot.SpecialFields)
-                {
-                    TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId}");
-                }
+                    TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId?.Entry ?? "unknown"}");
 
                 await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext);
                 continue;
@@ -510,20 +318,19 @@ public static class SingleplayerCombatStateSnapshotService
                 MoveStateMachineCurrentStateField?.SetValue(moveStateMachine, moveState);
                 MoveStateMachinePerformedFirstMoveField?.SetValue(moveStateMachine, snapshot.PerformedFirstMove);
                 if (!snapshot.IsTemporaryStunned)
-                    creature?.PrepareForNextTurn(combatState.PlayerCreatures, false);
+                    creature.PrepareForNextTurn(combatState.PlayerCreatures, false);
             }
             else if (!string.IsNullOrWhiteSpace(snapshot.CurrentMoveStateId))
             {
                 MainFile.Logger.Warn(
-                    $"Skipped restoring singleplayer move state {snapshot.CurrentMoveStateId} for monster {snapshot.MonsterId} " +
+                    $"Skipped restoring multiplayer move state {snapshot.CurrentMoveStateId} for monster {snapshot.MonsterId?.Entry ?? "unknown"} " +
                     $"because it was not present after restore. Slot={snapshot.SlotName}, TemporaryStunned={snapshot.IsTemporaryStunned}");
             }
 
             foreach (var fieldSnapshot in snapshot.SpecialFields)
-            {
-                TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId}");
-            }
+                TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId?.Entry ?? "unknown"}");
 
+            RestoreFabricatorState(monster, snapshot, restoreContext);
             await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext);
         }
     }
@@ -547,15 +354,71 @@ public static class SingleplayerCombatStateSnapshotService
 
             MainFile.Logger.Info(
                 $"Recreated illusion revive move state for {restoreContext}. " +
-                $"Monster={snapshot.MonsterId}, Slot={snapshot.SlotName}, FollowUp={snapshot.CurrentMoveFollowUpStateId ?? "null"}");
+                $"Monster={snapshot.MonsterId?.Entry ?? "unknown"}, Slot={snapshot.SlotName}, FollowUp={snapshot.CurrentMoveFollowUpStateId ?? "null"}");
             return true;
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
                 $"Failed to recreate illusion revive move state for {restoreContext}. " +
-                $"Monster={snapshot.MonsterId}, Slot={snapshot.SlotName}, FollowUp={snapshot.CurrentMoveFollowUpStateId ?? "null"}: {e.Message}");
+                $"Monster={snapshot.MonsterId?.Entry ?? "unknown"}, Slot={snapshot.SlotName}, FollowUp={snapshot.CurrentMoveFollowUpStateId ?? "null"}: {e.Message}");
             return false;
+        }
+    }
+
+    private static async Task EnsureTemporaryStunnedMoveStateAsync(Creature? creature, CombatCreatureSnapshot snapshot, string restoreContext)
+    {
+        if (creature == null || !snapshot.IsTemporaryStunned)
+            return;
+
+        var moveStateMachine = creature.Monster?.MoveStateMachine;
+        if (moveStateMachine?.States.ContainsKey(snapshot.CurrentMoveStateId ?? string.Empty) == true)
+            return;
+
+        try
+        {
+            if (creature.Monster is BowlbugRock bowlbugRock)
+            {
+                await CreatureCmd.Stun(
+                    creature,
+                    async _ =>
+                    {
+                        bowlbugRock.IsOffBalance = false;
+                        await CreatureCmd.TriggerAnim(creature, "Unstun", 0.6f);
+                    },
+                    snapshot.CurrentMoveFollowUpStateId ?? string.Empty);
+            }
+            else
+            {
+                await CreatureCmd.Stun(creature, snapshot.CurrentMoveFollowUpStateId ?? string.Empty);
+            }
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to recreate temporary stunned move state for {restoreContext}. " +
+                $"Monster={snapshot.MonsterId?.Entry ?? "unknown"}, Slot={snapshot.SlotName}, FollowUp={snapshot.CurrentMoveFollowUpStateId ?? "null"}: {e.Message}");
+        }
+    }
+
+    private static void ApplyFollowUpStateSnapshot(
+        MonsterMoveStateMachine moveStateMachine,
+        MoveState moveState,
+        CombatCreatureSnapshot snapshot,
+        Creature? creature)
+    {
+        if (string.IsNullOrWhiteSpace(snapshot.CurrentMoveFollowUpStateId))
+            return;
+
+        if (moveStateMachine.States.TryGetValue(snapshot.CurrentMoveFollowUpStateId, out var followUpState))
+        {
+            moveState.FollowUpState = followUpState;
+        }
+        else
+        {
+            MainFile.Logger.Warn(
+                $"Could not resolve follow-up move state {snapshot.CurrentMoveFollowUpStateId} while restoring " +
+                $"{snapshot.MonsterId?.Entry ?? creature?.Monster?.Id.Entry ?? "unknown"} at slot {snapshot.SlotName ?? "unknown"}.");
         }
     }
 
@@ -607,19 +470,14 @@ public static class SingleplayerCombatStateSnapshotService
         try
         {
             await CreatureCmd.TriggerAnim(creature, "Hatch", 0.5f);
-
             RepositionToughEggNode(creature, toughEgg, snapshot, creatureNode);
             if (creatureNode != null)
                 await creatureNode.RefreshIntents();
-
-            MainFile.Logger.Info(
-                $"Synchronized hatched tough egg visuals during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Slot={snapshot.SlotName ?? "unknown"} Move={snapshot.CurrentMoveStateId ?? "unknown"}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize hatched tough egg visuals during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize hatched tough egg visuals during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Slot={snapshot.SlotName ?? "unknown"} Move={snapshot.CurrentMoveStateId ?? "unknown"}: {e.Message}");
         }
     }
@@ -633,12 +491,7 @@ public static class SingleplayerCombatStateSnapshotService
         {
             var creatureNode = NCombatRoom.Instance?.GetCreatureNode(creature);
             if (creatureNode == null || !creatureNode.HasSpineAnimation || creature.Monster is not KnowledgeDemon knowledgeDemon)
-            {
-                MainFile.Logger.Warn(
-                    $"Skipped Knowledge Demon visual sync during singleplayer combat snapshot restore for {restoreContext} " +
-                    $"because the creature node or spine animation was unavailable. Move={snapshot.CurrentMoveStateId ?? "unknown"}");
                 return;
-            }
 
             var isBurnt = TryReadSpecialFieldBool(snapshot.SpecialFields, "_isBurnt", out var restoredBurnt)
                 ? restoredBurnt
@@ -651,15 +504,11 @@ public static class SingleplayerCombatStateSnapshotService
             SynchronizeKnowledgeDemonBurningVfx(creatureNode, isBurnt);
 
             await creatureNode.RefreshIntents();
-
-            MainFile.Logger.Info(
-                $"Synchronized Knowledge Demon visual state during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Move={snapshot.CurrentMoveStateId ?? "unknown"} Burnt={isBurnt} Anim={targetAnimationId}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize Knowledge Demon visual state during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize Knowledge Demon visual state during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Move={snapshot.CurrentMoveStateId ?? "unknown"}: {e.Message}");
         }
     }
@@ -712,25 +561,41 @@ public static class SingleplayerCombatStateSnapshotService
             var creatureNode = NCombatRoom.Instance?.GetCreatureNode(creature);
             if (creatureNode != null)
                 await creatureNode.RefreshIntents();
-
-            LogKaiserCrabRocketRestoreDebug(
-                CombatStateCompatibilityService.GetCombatState(creature),
-                [],
-                restoreContext,
-                "rocket-sync-before-power-extras");
-
-            MainFile.Logger.Info(
-                $"Synchronized Kaiser Crab rocket combat state during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Slot={snapshot.SlotName ?? "unknown"} Move={snapshot.CurrentMoveStateId ?? "unknown"} " +
-                $"Strength={creature.GetPower<StrengthPower>()?.Amount ?? 0} " +
-                $"CrabRage={(creature.GetPower<CrabRagePower>() != null)}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize Kaiser Crab rocket combat state during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize Kaiser Crab rocket combat state during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Slot={snapshot.SlotName ?? "unknown"} Move={snapshot.CurrentMoveStateId ?? "unknown"}: {e.Message}");
         }
+    }
+
+    private static void SynchronizeKaiserCrabRocketPowerState(Creature creature, CombatCreatureSnapshot snapshot)
+    {
+        SynchronizeSnapshotPowerAmount<StrengthPower>(creature, snapshot, StrengthPowerId);
+        SynchronizeSnapshotPowerAmount<CrabRagePower>(creature, snapshot, CrabRagePowerId);
+    }
+
+    private static void SynchronizeSnapshotPowerAmount<TPower>(Creature creature, CombatCreatureSnapshot snapshot, ModelId powerId)
+        where TPower : PowerModel
+    {
+        var desiredAmount = snapshot.Powers
+            .Where(power => power.Id == powerId)
+            .Select(power => power.Amount)
+            .DefaultIfEmpty(0)
+            .Last();
+
+        var existingPower = creature.GetPower<TPower>();
+        var existingAmount = existingPower?.Amount ?? 0;
+        if (existingAmount == desiredAmount)
+            return;
+
+        existingPower?.RemoveInternal();
+        if (desiredAmount == 0)
+            return;
+
+        var restoredPower = ModelDb.Power<TPower>().ToMutable();
+        restoredPower.ApplyInternal(creature, desiredAmount, true);
     }
 
     private static async Task TrySynchronizeDoormakerVisualStateAsync(
@@ -743,12 +608,7 @@ public static class SingleplayerCombatStateSnapshotService
         {
             var creatureNode = NCombatRoom.Instance?.GetCreatureNode(creature);
             if (creatureNode == null)
-            {
-                MainFile.Logger.Warn(
-                    $"Skipped Doormaker visual sync during singleplayer combat snapshot restore for {restoreContext} " +
-                    $"because the creature node was unavailable. Move={snapshot.CurrentMoveStateId ?? "unknown"}");
                 return;
-            }
 
             var isPortalOpen = TryReadSpecialFieldBool(snapshot.SpecialFields, "_isPortalOpen", out var restoredPortalOpen)
                 ? restoredPortalOpen
@@ -759,36 +619,17 @@ public static class SingleplayerCombatStateSnapshotService
             if (isPortalOpen)
             {
                 var visualPath = ResolveDoormakerVisualPath(creature, snapshot);
-                if (!string.IsNullOrWhiteSpace(visualPath))
-                {
-                    if (DoormakerUpdateVisualMethod != null)
-                    {
-                        DoormakerUpdateVisualMethod.Invoke(doormaker, new object?[] { visualPath });
-                    }
-                    else
-                    {
-                        MainFile.Logger.Warn(
-                            $"Skipped Doormaker visual texture sync during singleplayer combat snapshot restore for {restoreContext} " +
-                            $"because UpdateVisual could not be reflected. Move={snapshot.CurrentMoveStateId ?? "unknown"}");
-                    }
-                }
+                if (!string.IsNullOrWhiteSpace(visualPath) && DoormakerUpdateVisualMethod != null)
+                    DoormakerUpdateVisualMethod.Invoke(doormaker, [visualPath]);
             }
 
             creatureNode.GetNodeOrNull<Node>("%HealthBar")?.Call("RefreshValues");
             await creatureNode.RefreshIntents();
-
-            MainFile.Logger.Info(
-                $"Synchronized Doormaker phase state during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Move={snapshot.CurrentMoveStateId ?? "unknown"} PortalOpen={isPortalOpen} " +
-                $"Hunger={(creature.GetPower<HungerPower>() != null)} " +
-                $"Scrutiny={(creature.GetPower<ScrutinyPower>() != null)} " +
-                $"Grasp={(creature.GetPower<GraspPower>() != null)} " +
-                $"InfiniteHp={creature.ShowsInfiniteHp}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize Doormaker phase state during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize Doormaker phase state during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Move={snapshot.CurrentMoveStateId ?? "unknown"}: {e.Message}");
         }
     }
@@ -838,12 +679,7 @@ public static class SingleplayerCombatStateSnapshotService
         {
             var creatureNode = NCombatRoom.Instance?.GetCreatureNode(creature);
             if (creatureNode == null)
-            {
-                MainFile.Logger.Warn(
-                    $"Skipped Owl Magistrate visual sync during singleplayer combat snapshot restore for {restoreContext} " +
-                    $"because the creature node was unavailable. Move={snapshot.CurrentMoveStateId ?? "unknown"}");
                 return;
-            }
 
             var isFlying = TryReadSpecialFieldBool(snapshot.SpecialFields, "_isFlying", out var restoredFlying)
                 ? restoredFlying
@@ -861,16 +697,11 @@ public static class SingleplayerCombatStateSnapshotService
 
             creatureNode.GetNodeOrNull<Node>("%HealthBar")?.Call("RefreshValues");
             await creatureNode.RefreshIntents();
-
-            MainFile.Logger.Info(
-                $"Synchronized Owl Magistrate flying state during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Move={snapshot.CurrentMoveStateId ?? "unknown"} Flying={isFlying} " +
-                $"Soar={(creature.GetPower<SoarPower>() != null)}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize Owl Magistrate flying state during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize Owl Magistrate flying state during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Move={snapshot.CurrentMoveStateId ?? "unknown"}: {e.Message}");
         }
     }
@@ -903,123 +734,9 @@ public static class SingleplayerCombatStateSnapshotService
 
         CreatureAnimatorCurrentStateField.SetValue(spineAnimator, flyLoopState);
         creatureNode.SpineAnimation.SetAnimation(flyLoopState.Id, flyLoopState.IsLooping, 0);
-
         if (!string.IsNullOrWhiteSpace(flyLoopState.BoundsContainer))
             creatureNode.Call("UpdateBounds", flyLoopState.BoundsContainer);
-
         return true;
-    }
-
-    private static void SynchronizeKaiserCrabRocketPowerState(Creature creature, CombatCreatureSnapshot snapshot)
-    {
-        SynchronizeSnapshotPowerAmount<StrengthPower>(creature, snapshot, StrengthPowerId);
-        SynchronizeSnapshotPowerAmount<CrabRagePower>(creature, snapshot, CrabRagePowerId);
-    }
-
-    private static void SynchronizeSnapshotPowerAmount<TPower>(Creature creature, CombatCreatureSnapshot snapshot, ModelId powerId)
-        where TPower : PowerModel
-    {
-        var desiredAmount = snapshot.Powers
-            .Where(power => power.Id == powerId)
-            .Select(power => power.Amount)
-            .DefaultIfEmpty(0)
-            .Last();
-
-        var existingPower = creature.GetPower<TPower>();
-        var existingAmount = existingPower?.Amount ?? 0;
-        if (existingAmount == desiredAmount)
-            return;
-
-        existingPower?.RemoveInternal();
-        if (desiredAmount == 0)
-            return;
-
-        var restoredPower = ModelDb.Power<TPower>().ToMutable();
-        restoredPower.ApplyInternal(creature, desiredAmount, true);
-    }
-
-    private static void LogKaiserCrabRocketRestoreDebug(
-        CombatState? combatState,
-        IReadOnlyList<CombatCreatureSnapshot> snapshots,
-        string restoreContext,
-        string phase)
-    {
-        if (combatState == null)
-            return;
-
-        var rocket = combatState.Creatures.FirstOrDefault(creature => creature.Monster is Rocket);
-        if (rocket == null)
-            return;
-
-        try
-        {
-            var player = LocalContext.GetMe(combatState)?.Creature ?? combatState.Players.FirstOrDefault()?.Creature;
-            var liveFacing = player?.GetPower<SurroundedPower>()?.Facing.ToString() ?? "none";
-            var snapshotFacing = TryGetSnapshotSurroundedFacing(snapshots, out var facing)
-                ? facing.ToString()
-                : "missing";
-            var attackIntent = rocket.Monster?.NextMove?.Intents?.OfType<AttackIntent>().FirstOrDefault();
-            var targets = combatState.Players
-                .Select(playerState => playerState.Creature)
-                .Where(creature => creature != null)
-                .Cast<Creature>()
-                .ToList();
-            var singleDamage = attackIntent?.GetSingleDamage(targets, rocket);
-            var totalDamage = attackIntent?.GetTotalDamage(targets, rocket);
-            var attackTier = totalDamage.HasValue ? ResolveAttackIntentTier(totalDamage.Value).ToString() : "none";
-
-            MainFile.Logger.Info(
-                $"[HandsUp][rocket-debug] phase={phase} restore={restoreContext} " +
-                $"move={rocket.Monster?.NextMove?.Id ?? "none"} " +
-                $"snapshotFacing={snapshotFacing} liveFacing={liveFacing} " +
-                $"strength={rocket.GetPower<StrengthPower>()?.Amount ?? 0} " +
-                $"crabRage={(rocket.GetPower<CrabRagePower>() != null)} " +
-                $"singleDamage={singleDamage?.ToString() ?? "none"} " +
-                $"totalDamage={totalDamage?.ToString() ?? "none"} " +
-                $"tier={attackTier}");
-        }
-        catch (Exception e)
-        {
-            MainFile.Logger.Warn($"[HandsUp][rocket-debug] Failed to log Kaiser Crab rocket restore debug for {restoreContext} at {phase}: {e.Message}");
-        }
-    }
-
-    private static bool TryGetSnapshotSurroundedFacing(
-        IReadOnlyList<CombatCreatureSnapshot> snapshots,
-        out SurroundedPower.Direction facing)
-    {
-        facing = default;
-
-        var fieldSnapshot = snapshots
-            .Where(snapshot => snapshot.PlayerId.HasValue)
-            .SelectMany(snapshot => snapshot.Powers)
-            .FirstOrDefault(powerSnapshot => powerSnapshot.Id == SurroundedPowerId)?
-            .SpecialFields
-            .FirstOrDefault(field => string.Equals(field.FieldName, "_facing", StringComparison.Ordinal));
-        if (fieldSnapshot == null)
-            return false;
-
-        try
-        {
-            facing = JsonSerializer.Deserialize<SurroundedPower.Direction>(fieldSnapshot.ValueJson);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static int ResolveAttackIntentTier(int totalDamage)
-    {
-        return totalDamage switch
-        {
-            < 5 => 1,
-            < 10 => 2,
-            < 20 => 3,
-            < 40 => 4,
-            _ => 5
-        };
     }
 
     private static async Task TrySynchronizeTestSubjectVisualStateAsync(Creature creature, CombatCreatureSnapshot snapshot, string restoreContext)
@@ -1028,12 +745,7 @@ public static class SingleplayerCombatStateSnapshotService
         {
             var creatureNode = NCombatRoom.Instance?.GetCreatureNode(creature);
             if (creatureNode == null || !creatureNode.HasSpineAnimation || creatureNode.Visuals.SpineBody == null)
-            {
-                MainFile.Logger.Warn(
-                    $"Skipped Test Subject visual sync during singleplayer combat snapshot restore for {restoreContext} " +
-                    $"because the creature node or spine visuals were unavailable. Slot={snapshot.SlotName ?? "unknown"}");
                 return;
-            }
 
             var respawns = TryReadSpecialFieldInt(snapshot.SpecialFields, "_respawns", out var restoredRespawns)
                 ? Math.Max(0, restoredRespawns)
@@ -1041,12 +753,7 @@ public static class SingleplayerCombatStateSnapshotService
             var animationId = ResolveTestSubjectAnimationId(snapshot, respawns);
             var spineBody = creatureNode.Visuals.SpineBody;
             if (!spineBody.HasAnimation(animationId))
-            {
-                MainFile.Logger.Warn(
-                    $"Skipped Test Subject visual sync during singleplayer combat snapshot restore for {restoreContext} " +
-                    $"because animation {animationId} was unavailable. Slot={snapshot.SlotName ?? "unknown"} Respawns={respawns}");
                 return;
-            }
 
             creatureNode.SetDefaultScaleTo(1f + respawns * 0.1f, 0f);
             creatureNode.SpineAnimation.SetAnimation(
@@ -1054,15 +761,11 @@ public static class SingleplayerCombatStateSnapshotService
                 !string.Equals(animationId, TestSubjectDieAnimationId, StringComparison.Ordinal),
                 0);
             await creatureNode.RefreshIntents();
-
-            MainFile.Logger.Info(
-                $"Synchronized Test Subject visual state during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Slot={snapshot.SlotName ?? "unknown"} Respawns={respawns} Move={snapshot.CurrentMoveStateId ?? "unknown"} Anim={animationId}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize Test Subject visual state during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize Test Subject visual state during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Slot={snapshot.SlotName ?? "unknown"} Move={snapshot.CurrentMoveStateId ?? "unknown"}: {e.Message}");
         }
     }
@@ -1094,21 +797,11 @@ public static class SingleplayerCombatStateSnapshotService
         {
             var background = NCombatRoom.Instance?.Background?.GetNodeOrNull<NKaiserCrabBossBackground>("%KaiserCrab");
             if (background == null)
-            {
-                MainFile.Logger.Warn(
-                    $"Skipped Kaiser Crab rocket visual sync during singleplayer combat snapshot restore for {restoreContext} " +
-                    $"because the boss background was unavailable. Move={snapshot.CurrentMoveStateId ?? "unknown"}");
                 return;
-            }
 
             var visuals = background.GetNodeOrNull<Node2D>("%Visuals");
             if (visuals == null)
-            {
-                MainFile.Logger.Warn(
-                    $"Skipped Kaiser Crab rocket visual sync during singleplayer combat snapshot restore for {restoreContext} " +
-                    $"because the boss visuals node was unavailable. Move={snapshot.CurrentMoveStateId ?? "unknown"}");
                 return;
-            }
 
             var animationState = new MegaSprite(visuals).GetAnimationState();
             switch (snapshot.CurrentMoveStateId)
@@ -1128,15 +821,11 @@ public static class SingleplayerCombatStateSnapshotService
                     animationState.SetAnimation("right/idle_loop", true, KaiserCrabRightArmTrack);
                     break;
             }
-
-            MainFile.Logger.Info(
-                $"Synchronized Kaiser Crab rocket visual state during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Move={snapshot.CurrentMoveStateId ?? "unknown"}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize Kaiser Crab rocket visual state during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize Kaiser Crab rocket visual state during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Move={snapshot.CurrentMoveStateId ?? "unknown"}: {e.Message}");
         }
     }
@@ -1155,6 +844,22 @@ public static class SingleplayerCombatStateSnapshotService
         {
             MainFile.Logger.Warn($"Failed to set Kaiser Crab right arm state to {rawState}: {e.Message}");
         }
+    }
+
+    private static bool TryGetEncounterSlotPosition(string? slotName, out Vector2 slotPosition)
+    {
+        slotPosition = Vector2.Zero;
+
+        var encounterSlots = NCombatRoomEncounterSlotsProperty?.GetValue(NCombatRoom.Instance) as Control;
+        if (encounterSlots == null || string.IsNullOrWhiteSpace(slotName))
+            return false;
+
+        var slotMarker = encounterSlots.GetNodeOrNull<Marker2D>(slotName);
+        if (slotMarker == null)
+            return false;
+
+        slotPosition = slotMarker.GlobalPosition;
+        return true;
     }
 
     private static void RepositionToughEggNode(
@@ -1178,82 +883,6 @@ public static class SingleplayerCombatStateSnapshotService
             creatureNode.GlobalPosition = slotPosition;
     }
 
-    private static bool TryGetEncounterSlotPosition(string? slotName, out Vector2 slotPosition)
-    {
-        slotPosition = Vector2.Zero;
-
-        var encounterSlots = NCombatRoomEncounterSlotsProperty?.GetValue(NCombatRoom.Instance) as Control;
-        if (encounterSlots == null || string.IsNullOrWhiteSpace(slotName))
-            return false;
-
-        var slotMarker = encounterSlots.GetNodeOrNull<Marker2D>(slotName);
-        if (slotMarker == null)
-            return false;
-
-        slotPosition = slotMarker.GlobalPosition;
-        return true;
-    }
-
-    private static async Task EnsureTemporaryStunnedMoveStateAsync(Creature? creature, CombatCreatureSnapshot snapshot, string restoreContext)
-    {
-        if (creature == null || !snapshot.IsTemporaryStunned)
-            return;
-
-        var moveStateMachine = creature.Monster?.MoveStateMachine;
-        if (moveStateMachine?.States.ContainsKey(snapshot.CurrentMoveStateId ?? string.Empty) == true)
-            return;
-
-        try
-        {
-            if (creature.Monster is BowlbugRock bowlbugRock)
-            {
-                await CreatureCmd.Stun(
-                    creature,
-                    async _ =>
-                    {
-                        bowlbugRock.IsOffBalance = false;
-                        await CreatureCmd.TriggerAnim(creature, "Unstun", 0.6f);
-                    },
-                    snapshot.CurrentMoveFollowUpStateId ?? string.Empty);
-            }
-            else
-            {
-                await CreatureCmd.Stun(creature, snapshot.CurrentMoveFollowUpStateId ?? string.Empty);
-            }
-
-            MainFile.Logger.Info(
-                $"Recreated temporary stunned move state for {restoreContext}. " +
-                $"Monster={snapshot.MonsterId}, Slot={snapshot.SlotName}, FollowUp={snapshot.CurrentMoveFollowUpStateId ?? "null"}");
-        }
-        catch (Exception e)
-        {
-            MainFile.Logger.Warn(
-                $"Failed to recreate temporary stunned move state for {restoreContext}. " +
-                $"Monster={snapshot.MonsterId}, Slot={snapshot.SlotName}, FollowUp={snapshot.CurrentMoveFollowUpStateId ?? "null"}: {e.Message}");
-        }
-    }
-
-    private static void ApplyFollowUpStateSnapshot(
-        MonsterMoveStateMachine moveStateMachine,
-        MoveState moveState,
-        CombatCreatureSnapshot snapshot,
-        Creature? creature)
-    {
-        if (string.IsNullOrWhiteSpace(snapshot.CurrentMoveFollowUpStateId))
-            return;
-
-        if (moveStateMachine.States.TryGetValue(snapshot.CurrentMoveFollowUpStateId, out var followUpState))
-        {
-            moveState.FollowUpState = followUpState;
-        }
-        else
-        {
-            MainFile.Logger.Warn(
-                $"Could not resolve follow-up move state {snapshot.CurrentMoveFollowUpStateId} while restoring " +
-                $"{snapshot.MonsterId ?? creature?.Monster?.Id.Entry ?? "unknown"} at slot {snapshot.SlotName ?? "unknown"}.");
-        }
-    }
-
     private static void RestorePowerExtras(
         RunState runState,
         CombatState combatState,
@@ -1269,20 +898,66 @@ public static class SingleplayerCombatStateSnapshotService
             if (creature == null)
                 continue;
 
-            foreach (var powerSnapshot in snapshot.Powers)
+            foreach (var (powerSnapshot, restoredPower) in MatchPowerSnapshotsToRestoredPowers(creature, snapshot.Powers, restoreContext))
             {
-                var restoredPower = creature.Powers.LastOrDefault(power => power.Id == powerSnapshot.Id);
-                if (restoredPower == null)
-                    continue;
-
+                RestorePowerDynamicVars(restoredPower, powerSnapshot, restoreContext);
+                RestorePowerApplier(restoredPower, powerSnapshot, combatState, restoreContext);
                 RestorePowerTarget(restoredPower, powerSnapshot, combatState, restoreContext);
                 RestoreSwipePowerState(restoredPower, powerSnapshot, runState, combatState, usedDeckCardsByPlayer, restoreContext);
 
                 foreach (var fieldSnapshot in powerSnapshot.SpecialFields)
-                {
                     TryRestoreField(restoredPower, fieldSnapshot, $"power {powerSnapshot.Id}");
-                }
+
+                RestoreThieveryPowerState(restoredPower, powerSnapshot, restoreContext);
+                RestoreTenderPowerState(restoredPower, powerSnapshot, restoreContext);
+                RestoreComplexPowerState(runState, combatState, restoredPower, powerSnapshot, usedDeckCardsByPlayer, restoreContext);
             }
+        }
+    }
+
+    private static void RestorePowerApplier(PowerModel restoredPower, CombatPowerSnapshot powerSnapshot, CombatState combatState, string restoreContext)
+    {
+        if (powerSnapshot.Applier == null)
+            return;
+
+        var applier = ResolveCreatureReference(combatState, powerSnapshot.Applier);
+        if (applier == null)
+        {
+            MainFile.Logger.Warn(
+                $"Skipped restoring applier for power {powerSnapshot.Id} during multiplayer combat snapshot restore for {restoreContext} " +
+                $"because creature {DescribeCreatureReferenceForLog(powerSnapshot.Applier)} was not found.");
+            return;
+        }
+
+        try
+        {
+            restoredPower.Applier = applier;
+            TryRestorePowerApplierDisplay(restoredPower, restoreContext);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to restore applier for power {powerSnapshot.Id} during multiplayer combat snapshot restore for {restoreContext}: {e.Message}");
+        }
+    }
+
+    private static void TryRestorePowerApplierDisplay(PowerModel restoredPower, string restoreContext)
+    {
+        var applierPlayer = restoredPower.Applier?.Player;
+        if (applierPlayer == null)
+            return;
+
+        if (!restoredPower.DynamicVars.TryGetValue("Applier", out var dynamicVar) || dynamicVar is not StringVar stringVar)
+            return;
+
+        try
+        {
+            stringVar.StringValue = PlatformUtil.GetPlayerName(RunManager.Instance.NetService.Platform, applierPlayer.NetId);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to refresh applier display text for power {restoredPower.Id} during multiplayer combat snapshot restore for {restoreContext}: {e.Message}");
         }
     }
 
@@ -1295,7 +970,7 @@ public static class SingleplayerCombatStateSnapshotService
         if (targetPlayer?.Creature == null)
         {
             MainFile.Logger.Warn(
-                $"Skipped restoring target for power {powerSnapshot.Id} during singleplayer combat snapshot restore for {restoreContext} " +
+                $"Skipped restoring target for power {powerSnapshot.Id} during multiplayer combat snapshot restore for {restoreContext} " +
                 $"because player {powerSnapshot.TargetPlayerId.Value} was not found.");
             return;
         }
@@ -1304,6 +979,9 @@ public static class SingleplayerCombatStateSnapshotService
         {
             case ThieveryPower thieveryPower:
                 thieveryPower.Target = targetPlayer.Creature;
+                break;
+            case HeistPower heistPower:
+                heistPower.Target = targetPlayer.Creature;
                 break;
             case SwipePower swipePower:
                 swipePower.Target = targetPlayer.Creature;
@@ -1366,7 +1044,7 @@ public static class SingleplayerCombatStateSnapshotService
         if (targetPlayer == null)
         {
             MainFile.Logger.Warn(
-                $"Skipped restoring stolen card for swipe power during singleplayer combat snapshot restore for {restoreContext} " +
+                $"Skipped restoring stolen card for swipe power during multiplayer combat snapshot restore for {restoreContext} " +
                 $"because player {powerSnapshot.TargetPlayerId?.ToString() ?? "unknown"} was not found.");
             swipePower.StolenCard = null;
             return;
@@ -1374,6 +1052,292 @@ public static class SingleplayerCombatStateSnapshotService
 
         var usedDeckCards = GetOrCreateUsedDeckCards(usedDeckCardsByPlayer, targetPlayer);
         swipePower.StolenCard = RestoreDetachedCardFromSnapshot(runState, targetPlayer, powerSnapshot.SwipeStolenCard, usedDeckCards, restoreContext);
+    }
+
+    private static void RestoreThieveryPowerState(PowerModel restoredPower, CombatPowerSnapshot powerSnapshot, string restoreContext)
+    {
+        if (restoredPower is not ThieveryPower thieveryPower || !powerSnapshot.ThieveryStolenGold.HasValue)
+            return;
+
+        try
+        {
+            thieveryPower.DynamicVars.Gold.BaseValue = powerSnapshot.ThieveryStolenGold.Value;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to restore stolen gold for thievery power during multiplayer combat snapshot restore for {restoreContext}: {e.Message}");
+        }
+    }
+
+    private static void RestoreTenderPowerState(PowerModel restoredPower, CombatPowerSnapshot powerSnapshot, string restoreContext)
+    {
+        if (restoredPower is not TenderPower tenderPower || !powerSnapshot.TenderCardsPlayedThisTurn.HasValue)
+            return;
+
+        try
+        {
+            if (TenderPowerCardsPlayedThisTurnProperty?.CanWrite == true)
+            {
+                TenderPowerCardsPlayedThisTurnProperty.SetValue(tenderPower, powerSnapshot.TenderCardsPlayedThisTurn.Value);
+                return;
+            }
+
+            if (TenderPowerCardsPlayedThisTurnField != null)
+                TenderPowerCardsPlayedThisTurnField.SetValue(tenderPower, powerSnapshot.TenderCardsPlayedThisTurn.Value);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to restore cards-played count for tender power during multiplayer combat snapshot restore for {restoreContext}: {e.Message}");
+        }
+    }
+
+    private static void RestorePowerDynamicVars(PowerModel restoredPower, CombatPowerSnapshot powerSnapshot, string restoreContext)
+    {
+        if (powerSnapshot.DynamicVars.Count == 0)
+            return;
+
+        foreach (var dynamicVarSnapshot in powerSnapshot.DynamicVars)
+        {
+            if (!restoredPower.DynamicVars.TryGetValue(dynamicVarSnapshot.Name, out var dynamicVar))
+                continue;
+
+            try
+            {
+                dynamicVar.BaseValue = dynamicVarSnapshot.BaseValue;
+                if (dynamicVar is StringVar stringVar && dynamicVarSnapshot.HasStringValue)
+                    stringVar.StringValue = dynamicVarSnapshot.StringValue ?? string.Empty;
+            }
+            catch (Exception e)
+            {
+                MainFile.Logger.Warn(
+                    $"Failed to restore dynamic var {dynamicVarSnapshot.Name} for power {powerSnapshot.Id} during multiplayer combat snapshot restore for {restoreContext}: {e.Message}");
+            }
+        }
+    }
+
+    private static void RestoreComplexPowerState(
+        RunState runState,
+        CombatState combatState,
+        PowerModel restoredPower,
+        CombatPowerSnapshot powerSnapshot,
+        IDictionary<ulong, HashSet<CardModel>> usedDeckCardsByPlayer,
+        string restoreContext)
+    {
+        RestoreNightmarePowerState(runState, combatState, restoredPower, powerSnapshot, usedDeckCardsByPlayer, restoreContext);
+        RestoreVitalSparkPowerState(combatState, restoredPower, powerSnapshot, restoreContext);
+        RestoreCreatureDecimalMapPowerState(combatState, restoredPower, powerSnapshot, restoreContext);
+        RestoreCardIntMapPowerState(combatState, restoredPower, powerSnapshot, restoreContext);
+        RestoreDampenPowerState(combatState, restoredPower, powerSnapshot, restoreContext);
+    }
+
+    private static void RestoreNightmarePowerState(
+        RunState runState,
+        CombatState combatState,
+        PowerModel restoredPower,
+        CombatPowerSnapshot powerSnapshot,
+        IDictionary<ulong, HashSet<CardModel>> usedDeckCardsByPlayer,
+        string restoreContext)
+    {
+        if (restoredPower is not NightmarePower nightmarePower || powerSnapshot.NightmareSelectedCard == null)
+            return;
+
+        var player = nightmarePower.Owner?.Player;
+        if (player == null)
+        {
+            MainFile.Logger.Warn(
+                $"Skipped restoring nightmare selected card during multiplayer combat snapshot restore for {restoreContext} because owner player was not found.");
+            return;
+        }
+
+        var usedDeckCards = GetOrCreateUsedDeckCards(usedDeckCardsByPlayer, player);
+        var restoredCard = RestoreDetachedCardFromSnapshot(runState, player, powerSnapshot.NightmareSelectedCard, usedDeckCards, restoreContext);
+        if (restoredCard == null)
+            return;
+
+        try
+        {
+            nightmarePower.SetSelectedCard(restoredCard);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to restore nightmare selected card during multiplayer combat snapshot restore for {restoreContext}: {e.Message}");
+        }
+    }
+
+    private static void RestoreVitalSparkPowerState(
+        CombatState combatState,
+        PowerModel restoredPower,
+        CombatPowerSnapshot powerSnapshot,
+        string restoreContext)
+    {
+        if (restoredPower is not VitalSparkPower || powerSnapshot.VitalSparkTriggeredPlayerIds == null)
+            return;
+
+        if (!TryGetPowerInternalDataFieldValue<ISet<Player>>(restoredPower, "playersTriggeredThisTurn", out var triggeredPlayers)
+            || triggeredPlayers == null)
+        {
+            return;
+        }
+
+        triggeredPlayers.Clear();
+        foreach (var playerId in powerSnapshot.VitalSparkTriggeredPlayerIds)
+        {
+            var player = combatState.RunState?.GetPlayer(playerId);
+            if (player != null)
+            {
+                triggeredPlayers.Add(player);
+                continue;
+            }
+
+            MainFile.Logger.Warn(
+                $"Skipped restoring vital spark triggered player {playerId} during multiplayer combat snapshot restore for {restoreContext} because the player was not found.");
+        }
+    }
+
+    private static void RestoreCreatureDecimalMapPowerState(
+        CombatState combatState,
+        PowerModel restoredPower,
+        CombatPowerSnapshot powerSnapshot,
+        string restoreContext)
+    {
+        if (powerSnapshot.CreatureDecimalEntries == null || powerSnapshot.CreatureDecimalEntries.Count == 0)
+            return;
+
+        var fieldName = restoredPower switch
+        {
+            PossessStrengthPower => "stolenStrength",
+            PossessSpeedPower => "stolenDexterity",
+            _ => null
+        };
+        if (fieldName == null)
+            return;
+
+        if (!TryGetPowerInternalDataFieldValue<IDictionary<Creature, decimal>>(restoredPower, fieldName, out var valueMap)
+            || valueMap == null)
+        {
+            return;
+        }
+
+        valueMap.Clear();
+        foreach (var entry in powerSnapshot.CreatureDecimalEntries)
+        {
+            if (entry.Creature == null)
+                continue;
+
+            var creature = ResolveCreatureReference(combatState, entry.Creature);
+            if (creature != null)
+            {
+                valueMap[creature] = entry.Value;
+                continue;
+            }
+
+            MainFile.Logger.Warn(
+                $"Skipped restoring {fieldName} entry during multiplayer combat snapshot restore for {restoreContext} because creature {DescribeCreatureReferenceForLog(entry.Creature)} was not found.");
+        }
+    }
+
+    private static void RestoreCardIntMapPowerState(
+        CombatState combatState,
+        PowerModel restoredPower,
+        CombatPowerSnapshot powerSnapshot,
+        string restoreContext)
+    {
+        if (powerSnapshot.CardIntEntries == null || powerSnapshot.CardIntEntries.Count == 0)
+            return;
+
+        if (!TryGetTrackedCardIntMapFieldName(restoredPower, out var fieldName))
+            return;
+
+        if (!TryGetPowerInternalDataFieldValue<IDictionary<CardModel, int>>(restoredPower, fieldName, out var valueMap)
+            || valueMap == null)
+        {
+            return;
+        }
+
+        valueMap.Clear();
+        foreach (var entry in powerSnapshot.CardIntEntries)
+        {
+            var card = ResolveLiveCardReference(combatState, entry.Card);
+            if (card != null)
+            {
+                valueMap[card] = entry.Value;
+                continue;
+            }
+
+            MainFile.Logger.Warn(
+                $"Skipped restoring pending card entry for power {powerSnapshot.Id} during multiplayer combat snapshot restore for {restoreContext} because the card reference could not be resolved.");
+        }
+    }
+
+    private static void RestoreDampenPowerState(
+        CombatState combatState,
+        PowerModel restoredPower,
+        CombatPowerSnapshot powerSnapshot,
+        string restoreContext)
+    {
+        if (restoredPower is not DampenPower || powerSnapshot.DampenCasterReferences == null)
+            return;
+
+        if (!TryGetPowerInternalDataFieldValue<ISet<Creature>>(restoredPower, "casters", out var casters)
+            || casters == null)
+        {
+            return;
+        }
+
+        casters.Clear();
+        foreach (var reference in powerSnapshot.DampenCasterReferences)
+        {
+            var creature = ResolveCreatureReference(combatState, reference);
+            if (creature != null)
+            {
+                casters.Add(creature);
+                continue;
+            }
+
+            MainFile.Logger.Warn(
+                $"Skipped restoring dampen caster during multiplayer combat snapshot restore for {restoreContext} because creature {DescribeCreatureReferenceForLog(reference)} was not found.");
+        }
+    }
+
+    private static bool TryGetTrackedCardIntMapFieldName(PowerModel power, out string fieldName)
+    {
+        fieldName = power switch
+        {
+            AfterimagePower => "amountsForPlayedCards",
+            CalamityPower => "amountsForPlayedCards",
+            GravityPower => "amountsForPlayedCards",
+            OblivionPower => "amountsForPlayedCards",
+            MonologuePower => "amountsForPlayedCards",
+            SerpentFormPower => "amountsForPlayedCards",
+            StormPower => "amountsForPlayedCards",
+            StranglePower => "amountsForPlayedCards",
+            SubroutinePower => "amountsForPlayedCards",
+            RupturePower => "playedCards",
+            DampenPower => "downgradedCardsToOldUpgradeLevels",
+            _ => string.Empty
+        };
+
+        return fieldName.Length > 0;
+    }
+
+    private static void RestoreFabricatorState(MonsterModel monster, CombatCreatureSnapshot snapshot, string restoreContext)
+    {
+        if (monster is not Fabricator || snapshot.FabricatorLastSpawnedMonsterId == null)
+            return;
+
+        try
+        {
+            var lastSpawnedMonster = ModelDb.GetById<MonsterModel>(snapshot.FabricatorLastSpawnedMonsterId);
+            TrySetFieldValueByPath(monster, "_lastSpawned", lastSpawnedMonster);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to restore fabricator last-spawned state during multiplayer combat snapshot restore for {restoreContext}: {e.Message}");
+        }
     }
 
     private static async Task SynchronizePostRestoreSpecialPowerStateAsync(
@@ -1388,20 +1352,42 @@ public static class SingleplayerCombatStateSnapshotService
             if (creature == null)
                 continue;
 
-            foreach (var powerSnapshot in snapshot.Powers)
+            foreach (var (_, restoredPower) in MatchPowerSnapshotsToRestoredPowers(creature, snapshot.Powers, restoreContext))
             {
-                var restoredPower = creature.Powers.LastOrDefault(power => power.Id == powerSnapshot.Id);
-                if (restoredPower == null)
-                    continue;
-
-                await TrySynchronizeSpecialPowerStateAsync(restoredPower, powerSnapshot, restoreContext);
+                await TrySynchronizeSpecialPowerStateAsync(restoredPower, restoreContext);
             }
 
             SynchronizeThievingHopperStolenCardDisplay(creature, restoreContext);
         }
+
+        RebuildInterceptPowerCoverageState(combatState, restoreContext);
     }
 
-    private static async Task TrySynchronizeSpecialPowerStateAsync(PowerModel restoredPower, CombatPowerSnapshot powerSnapshot, string restoreContext)
+    private static IEnumerable<(CombatPowerSnapshot Snapshot, PowerModel Power)> MatchPowerSnapshotsToRestoredPowers(
+        Creature creature,
+        IReadOnlyList<CombatPowerSnapshot> powerSnapshots,
+        string restoreContext)
+    {
+        var powersById = creature.Powers
+            .GroupBy(power => power.Id)
+            .ToDictionary(group => group.Key, group => new Queue<PowerModel>(group));
+
+        foreach (var powerSnapshot in powerSnapshots)
+        {
+            if (!powersById.TryGetValue(powerSnapshot.Id, out var matchingPowers) || matchingPowers.Count == 0)
+            {
+                MainFile.Logger.Warn(
+                    $"Skipped restoring multiplayer power snapshot {powerSnapshot.Id} during {restoreContext} " +
+                    $"because no unmatched restored power instance remained for creature " +
+                    $"{creature.Monster?.Id.Entry ?? creature.Player?.NetId.ToString() ?? "unknown"}.");
+                continue;
+            }
+
+            yield return (powerSnapshot, matchingPowers.Dequeue());
+        }
+    }
+
+    private static async Task TrySynchronizeSpecialPowerStateAsync(PowerModel restoredPower, string restoreContext)
     {
         if (restoredPower is SurroundedPower surroundedPower)
         {
@@ -1412,35 +1398,18 @@ public static class SingleplayerCombatStateSnapshotService
         if (restoredPower is not SandpitPower sandpitPower)
             return;
 
-        if (sandpitPower.Target?.Player == null)
-        {
-            MainFile.Logger.Warn(
-                $"Skipped synchronizing sandpit power during singleplayer combat snapshot restore for {restoreContext} " +
-                $"because its target was missing. Amount={sandpitPower.Amount}");
+        if (sandpitPower.Target?.Player == null || SandpitPowerUpdateCreaturePositionsMethod == null)
             return;
-        }
-
-        if (SandpitPowerUpdateCreaturePositionsMethod == null)
-        {
-            MainFile.Logger.Warn(
-                $"Skipped synchronizing sandpit power during singleplayer combat snapshot restore for {restoreContext} " +
-                "because UpdateCreaturePositions could not be reflected.");
-            return;
-        }
 
         try
         {
             if (SandpitPowerUpdateCreaturePositionsMethod.Invoke(sandpitPower, null) is Task updateTask)
                 await updateTask;
-
-            MainFile.Logger.Info(
-                $"Synchronized sandpit power during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Amount={sandpitPower.Amount} TargetPlayer={sandpitPower.Target.Player.NetId}");
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to synchronize sandpit power during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize sandpit power during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Amount={sandpitPower.Amount} TargetPlayer={sandpitPower.Target.Player.NetId}: {e.Message}");
         }
     }
@@ -1448,12 +1417,7 @@ public static class SingleplayerCombatStateSnapshotService
     private static async Task SynchronizeSurroundedPowerStateAsync(SurroundedPower surroundedPower, string restoreContext)
     {
         if (SurroundedPowerFaceDirectionMethod == null)
-        {
-            MainFile.Logger.Warn(
-                $"Skipped synchronizing surrounded power during singleplayer combat snapshot restore for {restoreContext} " +
-                "because FaceDirection could not be reflected.");
             return;
-        }
 
         try
         {
@@ -1461,21 +1425,12 @@ public static class SingleplayerCombatStateSnapshotService
                 await faceTask;
 
             await RefreshEnemyIntentDisplaysAsync(surroundedPower.Owner?.CombatState);
-            var ownerPlayerId = surroundedPower.Owner?.Player is Player ownerPlayer
-                ? ownerPlayer.NetId.ToString()
-                : "unknown";
-
-            MainFile.Logger.Info(
-                $"Synchronized surrounded power during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Facing={surroundedPower.Facing} OwnerPlayer={ownerPlayerId}");
         }
         catch (Exception e)
         {
-            var ownerPlayerId = surroundedPower.Owner?.Player is Player ownerPlayer
-                ? ownerPlayer.NetId.ToString()
-                : "unknown";
+            var ownerPlayerId = surroundedPower.Owner?.Player is Player ownerPlayer ? ownerPlayer.NetId.ToString() : "unknown";
             MainFile.Logger.Warn(
-                $"Failed to synchronize surrounded power during singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to synchronize surrounded power during multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Facing={surroundedPower.Facing} OwnerPlayer={ownerPlayerId}: {e.Message}");
         }
     }
@@ -1494,13 +1449,48 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
+    private static void RebuildInterceptPowerCoverageState(CombatState combatState, string restoreContext)
+    {
+        var restoredCoverageCount = 0;
+
+        foreach (var coveredPower in combatState.Creatures
+                     .SelectMany(creature => creature.Powers.OfType<CoveredPower>()))
+        {
+            var applier = coveredPower.Applier;
+            var protectedCreature = coveredPower.Owner;
+            if (applier == null || protectedCreature == null)
+            {
+                MainFile.Logger.Warn(
+                    $"Skipped rebuilding intercept coverage during multiplayer combat snapshot restore for {restoreContext} " +
+                    $"because covered power {coveredPower.Id} was missing owner or applier.");
+                continue;
+            }
+
+            var interceptPower = applier.GetPower<InterceptPower>();
+            if (interceptPower == null)
+            {
+                MainFile.Logger.Warn(
+                    $"Skipped rebuilding intercept coverage during multiplayer combat snapshot restore for {restoreContext} " +
+                    $"because creature {DescribeCreatureForLog(applier)} had no intercept power.");
+                continue;
+            }
+
+            interceptPower.AddCoveredCreature(protectedCreature);
+            restoredCoverageCount++;
+        }
+
+        if (restoredCoverageCount > 0)
+        {
+            MainFile.Logger.Info(
+                $"Rebuilt {restoredCoverageCount} covered-creature link(s) for intercept powers during multiplayer combat snapshot restore for {restoreContext}.");
+        }
+    }
+
     private static void RestoreHiddenLiveAllyVisuals(CombatState combatState, string restoreContext)
     {
         var combatRoom = NCombatRoom.Instance;
         if (combatRoom == null)
             return;
-
-        var restoredCreatures = new List<string>();
 
         foreach (var creature in combatState.Allies.Where(creature => !creature.IsDead))
         {
@@ -1519,18 +1509,7 @@ public static class SingleplayerCombatStateSnapshotService
             visuals.Visible = true;
             visuals.Modulate = Colors.White;
             creatureNode.StartReviveAnim();
-
-            restoredCreatures.Add(creature.IsPlayer
-                ? $"player:{creature.Player?.NetId}"
-                : creature.Monster?.Id.Entry ?? "ally");
         }
-
-        if (restoredCreatures.Count == 0)
-            return;
-
-        MainFile.Logger.Info(
-            $"Restored hidden live ally visuals during singleplayer combat snapshot restore for {restoreContext}: " +
-            $"{string.Join(", ", restoredCreatures)}");
     }
 
     private static void SynchronizeThievingHopperStolenCardDisplay(Creature creature, string restoreContext)
@@ -1546,46 +1525,21 @@ public static class SingleplayerCombatStateSnapshotService
         foreach (var child in stolenCardMarker.GetChildren())
             child.QueueFree();
 
-        var swipePower = creature.Powers.OfType<SwipePower>().LastOrDefault();
-        var stolenCard = swipePower?.StolenCard;
-        if (stolenCard == null || !LocalContext.IsMine(stolenCard))
-            return;
-
-        var stolenCardNode = NCard.Create(stolenCard, ModelVisibility.Visible);
-        if (stolenCardNode == null)
-            return;
-
-        stolenCardMarker.AddChild(stolenCardNode);
-        stolenCardNode.Position += stolenCardNode.Size * 0.5f;
-        stolenCardNode.UpdateVisuals(PileType.Deck, CardPreviewMode.Normal);
-
-        MainFile.Logger.Info(
-            $"Synchronized thieving hopper stolen-card display during singleplayer combat snapshot restore for {restoreContext}. " +
-            $"Monster={creature.Monster?.Id.Entry ?? "THIEVING_HOPPER"} Card={stolenCard.Id.Entry}");
-    }
-
-    private static void RestorePlayerPiles(RunState runState, Player player, IReadOnlyList<CombatPileSnapshot> pileSnapshots)
-    {
-        var combat = player.PlayerCombatState!;
-        var usedDeckCards = new HashSet<CardModel>();
-        foreach (var existingCard in combat.AllPiles.SelectMany(pile => pile.Cards).ToList())
-            existingCard.RemoveFromState();
-
-        foreach (var pileSnapshot in pileSnapshots)
+        var localStolenCards = creature.Powers
+            .OfType<SwipePower>()
+            .Select(power => power.StolenCard)
+            .Where(card => card != null && LocalContext.IsMine(card))
+            .Cast<CardModel>()
+            .ToList();
+        for (var index = 0; index < localStolenCards.Count; index++)
         {
-            var targetPile = CardPile.Get(pileSnapshot.PileType, player);
-            if (targetPile == null)
+            var stolenCardNode = NCard.Create(localStolenCards[index], ModelVisibility.Visible);
+            if (stolenCardNode == null)
                 continue;
 
-            foreach (var cardSnapshot in pileSnapshot.Cards)
-            {
-                var card = runState.LoadCard(cardSnapshot.Card, player);
-                RegisterCardInCombatState(card);
-                card.DeckVersion = ResolveDeckVersion(runState, player, cardSnapshot, usedDeckCards);
-                ApplyCardSnapshotState(card, cardSnapshot);
-
-                targetPile.AddInternal(card, -1, false);
-            }
+            stolenCardMarker.AddChild(stolenCardNode);
+            stolenCardNode.Position += stolenCardNode.Size * 0.5f + Vector2.Right * (18f * index);
+            stolenCardNode.UpdateVisuals(PileType.Deck, CardPreviewMode.Normal);
         }
     }
 
@@ -1601,7 +1555,7 @@ public static class SingleplayerCombatStateSnapshotService
         var desiredDeckCard = cardSnapshot.DeckVersionCard ?? cardSnapshot.Card;
         var matchingDeckCard = player.Deck.Cards.FirstOrDefault(deckCard =>
             !usedDeckCards.Contains(deckCard)
-            && AreSerializableCardsEquivalent(deckCard.ToSerializable(), desiredDeckCard));
+            && MultiplayerSerializableCardStateService.MatchesDeckCardForRestore(deckCard.ToSerializable(), desiredDeckCard));
         if (matchingDeckCard != null)
         {
             usedDeckCards.Add(matchingDeckCard);
@@ -1610,7 +1564,10 @@ public static class SingleplayerCombatStateSnapshotService
 
         try
         {
-            var recreatedDeckCard = runState.LoadCard(desiredDeckCard, player);
+            var restoredDeckCard = MultiplayerSerializableCardStateService.ResolveCardForRestore(
+                desiredDeckCard,
+                player);
+            var recreatedDeckCard = runState.LoadCard(restoredDeckCard, player);
             player.Deck.AddInternal(recreatedDeckCard, -1, false);
             usedDeckCards.Add(recreatedDeckCard);
             return recreatedDeckCard;
@@ -1618,7 +1575,7 @@ public static class SingleplayerCombatStateSnapshotService
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to recreate missing deck version for singleplayer combat card snapshot restore. " +
+                $"Failed to recreate missing deck version for multiplayer combat card snapshot restore. " +
                 $"Player={player.NetId}, Card={desiredDeckCard.Id}: {e.Message}");
             return null;
         }
@@ -1633,9 +1590,14 @@ public static class SingleplayerCombatStateSnapshotService
     {
         try
         {
-            var card = runState.LoadCard(cardSnapshot.Card, player);
+            var deckVersion = ResolveRemovedDeckVersion(runState, player, cardSnapshot, usedDeckCards);
+            var loadableCard = MultiplayerSerializableCardStateService.ResolveCardForRestore(
+                cardSnapshot.Card,
+                player,
+                deckVersion?.ToSerializable() ?? cardSnapshot.DeckVersionCard);
+            var card = runState.LoadCard(loadableCard, player);
             RegisterCardInCombatState(card);
-            card.DeckVersion = ResolveRemovedDeckVersion(runState, player, cardSnapshot, usedDeckCards);
+            card.DeckVersion = deckVersion;
             ApplyCardSnapshotState(card, cardSnapshot);
             card.RemoveFromState();
             return card;
@@ -1643,7 +1605,7 @@ public static class SingleplayerCombatStateSnapshotService
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to restore detached combat card for singleplayer combat snapshot restore for {restoreContext}. " +
+                $"Failed to restore detached combat card for multiplayer combat snapshot restore for {restoreContext}. " +
                 $"Player={player.NetId}, Card={cardSnapshot.Card.Id}: {e.Message}");
             return null;
         }
@@ -1661,7 +1623,7 @@ public static class SingleplayerCombatStateSnapshotService
         var desiredDeckCard = cardSnapshot.DeckVersionCard ?? cardSnapshot.Card;
         var matchingDeckCard = player.Deck.Cards.FirstOrDefault(deckCard =>
             !usedDeckCards.Contains(deckCard)
-            && AreSerializableCardsEquivalent(deckCard.ToSerializable(), desiredDeckCard));
+            && MultiplayerSerializableCardStateService.MatchesDeckCardForRestore(deckCard.ToSerializable(), desiredDeckCard));
 
         CardModel deckVersion;
         if (matchingDeckCard != null)
@@ -1670,7 +1632,10 @@ public static class SingleplayerCombatStateSnapshotService
         }
         else
         {
-            deckVersion = runState.LoadCard(desiredDeckCard, player);
+            var restoredDeckCard = MultiplayerSerializableCardStateService.ResolveCardForRestore(
+                desiredDeckCard,
+                player);
+            deckVersion = runState.LoadCard(restoredDeckCard, player);
         }
 
         usedDeckCards.Add(deckVersion);
@@ -1701,19 +1666,88 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    private static void RestorePlayerOrbs(PlayerCombatState combat, IReadOnlyList<CombatOrbSnapshot> orbSnapshots)
+    private static CombatLiveCardReferenceSnapshot? CaptureLiveCardReference(CardModel? card)
     {
-        var orbQueue = combat.OrbQueue;
-        var capacity = orbQueue.Capacity;
-        orbQueue.Clear();
-        orbQueue.AddCapacity(capacity);
+        if (card?.Owner == null)
+            return null;
 
-        for (var index = 0; index < orbSnapshots.Count; index++)
+        var pile = card.Pile;
+        if (pile == null)
+            return null;
+
+        var cardIndex = -1;
+        for (var index = 0; index < pile.Cards.Count; index++)
         {
-            var orbSnapshot = orbSnapshots[index];
-            var orb = ModelDb.GetById<OrbModel>(orbSnapshot.Id).ToMutable();
-            orbQueue.Insert(index, orb);
+            if (!ReferenceEquals(pile.Cards[index], card))
+                continue;
+
+            cardIndex = index;
+            break;
         }
+
+        if (cardIndex < 0)
+            return null;
+
+        return new CombatLiveCardReferenceSnapshot
+        {
+            PlayerId = card.Owner.NetId,
+            PileType = pile.Type,
+            CardIndex = cardIndex,
+            Card = CombatCardSnapshot.FromCard(card)
+        };
+    }
+
+    private static CardModel? ResolveLiveCardReference(CombatState combatState, CombatLiveCardReferenceSnapshot? reference)
+    {
+        if (reference == null)
+            return null;
+
+        var player = combatState.RunState?.GetPlayer(reference.PlayerId);
+        if (player == null)
+            return null;
+
+        var pile = CardPile.Get(reference.PileType, player);
+        if (pile != null)
+        {
+            if (reference.CardIndex >= 0 && reference.CardIndex < pile.Cards.Count)
+            {
+                var indexedCard = pile.Cards[reference.CardIndex];
+                if (DoesCardMatchReference(indexedCard, reference))
+                    return indexedCard;
+            }
+
+            var matchingCard = pile.Cards.FirstOrDefault(card => DoesCardMatchReference(card, reference));
+            if (matchingCard != null)
+                return matchingCard;
+        }
+
+        return player.PlayerCombatState?.AllPiles
+            .SelectMany(currentPile => currentPile.Cards)
+            .FirstOrDefault(card => DoesCardMatchReference(card, reference));
+    }
+
+    private static bool DoesCardMatchReference(CardModel card, CombatLiveCardReferenceSnapshot reference)
+    {
+        if (reference.Card == null)
+            return true;
+
+        var currentCard = card.ToSerializable();
+        if (!AreSerializableCardsEquivalent(currentCard, reference.Card.Card)
+            && !MultiplayerSerializableCardStateService.MatchesDeckCardForRestore(currentCard, reference.Card.Card))
+            return false;
+
+        var currentAfflictionId = card.Affliction?.Id;
+        if (currentAfflictionId != reference.Card.Affliction)
+            return false;
+
+        var currentAfflictionCount = card.Affliction?.Amount ?? 0;
+        if (currentAfflictionCount != reference.Card.AfflictionCount)
+            return false;
+
+        if (reference.Card.Keywords == null)
+            return true;
+
+        return card.Keywords.SequenceEqual(reference.Card.Keywords);
     }
 
     private static void RestoreCombatManagerState(CombatManagerSnapshot? snapshot, string restoreContext)
@@ -1736,63 +1770,14 @@ public static class SingleplayerCombatStateSnapshotService
             if (snapshot.PlayersReadyToBeginEnemyTurnField != null)
                 TryRestoreField(combatManager, snapshot.PlayersReadyToBeginEnemyTurnField, "combat manager players-ready-to-begin-enemy-turn");
 
-            TryRestoreBooleanMember(
-                combatManager,
-                CombatManagerIsPlayPhaseProperty,
-                CombatManagerIsPlayPhaseField,
-                snapshot.IsPlayPhase,
-                "combat manager IsPlayPhase");
-            TryRestoreBooleanMember(
-                combatManager,
-                CombatManagerIsEnemyTurnStartedProperty,
-                CombatManagerIsEnemyTurnStartedField,
-                snapshot.IsEnemyTurnStarted,
-                "combat manager IsEnemyTurnStarted");
-            TryRestoreBooleanMember(
-                combatManager,
-                CombatManagerEndingPlayerTurnPhaseOneProperty,
-                CombatManagerEndingPlayerTurnPhaseOneField,
-                snapshot.EndingPlayerTurnPhaseOne,
-                "combat manager EndingPlayerTurnPhaseOne");
-            TryRestoreBooleanMember(
-                combatManager,
-                CombatManagerEndingPlayerTurnPhaseTwoProperty,
-                CombatManagerEndingPlayerTurnPhaseTwoField,
-                snapshot.EndingPlayerTurnPhaseTwo,
-                "combat manager EndingPlayerTurnPhaseTwo");
-
-            MainFile.Logger.Info(
-                $"Restored singleplayer combat manager runtime state for {restoreContext}. " +
-                $"playerActionsDisabled={CombatManager.Instance.PlayerActionsDisabled} " +
-                $"isPlayPhase={CombatManager.Instance.IsPlayPhase} " +
-                $"isEnemyTurnStarted={CombatManager.Instance.IsEnemyTurnStarted} " +
-                $"endingPhaseOne={CombatManager.Instance.EndingPlayerTurnPhaseOne} " +
-                $"endingPhaseTwo={CombatManager.Instance.EndingPlayerTurnPhaseTwo} " +
-                $"handCanPlay={GetHandCanPlayCardsState()?.ToString() ?? "unknown"} " +
-                $"handActionsAllowed={GetHandActionsAllowedState()?.ToString() ?? "unknown"}");
+            TryRestoreBooleanMember(combatManager, CombatManagerIsPlayPhaseProperty, CombatManagerIsPlayPhaseField, snapshot.IsPlayPhase, "combat manager IsPlayPhase");
+            TryRestoreBooleanMember(combatManager, CombatManagerIsEnemyTurnStartedProperty, CombatManagerIsEnemyTurnStartedField, snapshot.IsEnemyTurnStarted, "combat manager IsEnemyTurnStarted");
+            TryRestoreBooleanMember(combatManager, CombatManagerEndingPlayerTurnPhaseOneProperty, CombatManagerEndingPlayerTurnPhaseOneField, snapshot.EndingPlayerTurnPhaseOne, "combat manager EndingPlayerTurnPhaseOne");
+            TryRestoreBooleanMember(combatManager, CombatManagerEndingPlayerTurnPhaseTwoProperty, CombatManagerEndingPlayerTurnPhaseTwoField, snapshot.EndingPlayerTurnPhaseTwo, "combat manager EndingPlayerTurnPhaseTwo");
         }
         catch (Exception e)
         {
-            MainFile.Logger.Warn($"Failed to restore singleplayer combat manager runtime state for {restoreContext}: {e.Message}");
-        }
-    }
-
-    private static void ReinitializeCombatReplayWriter(string restoreContext)
-    {
-        var runManager = RunManager.Instance;
-        var replayWriter = runManager?.CombatReplayWriter;
-        if (runManager == null || replayWriter == null || CombatReplayWriterRecordInitialStateMethod == null)
-            return;
-
-        try
-        {
-            var save = runManager.ToSave(null);
-            CombatReplayWriterRecordInitialStateMethod.Invoke(replayWriter, [save]);
-            MainFile.Logger.Info($"Reinitialized singleplayer combat replay writer for {restoreContext}.");
-        }
-        catch (Exception e)
-        {
-            MainFile.Logger.Warn($"Failed to reinitialize singleplayer combat replay writer for {restoreContext}: {e.Message}");
+            MainFile.Logger.Warn($"Failed to restore multiplayer combat manager runtime state for {restoreContext}: {e.Message}");
         }
     }
 
@@ -1825,18 +1810,6 @@ public static class SingleplayerCombatStateSnapshotService
             RemoveCreatureNodeFromCombatRoom(combatRoomNode, node);
 
         await SynchronizeToughEggNodePositionsAsync(combatRoomNode, resolvedToughEggSnapshots, restoreContext);
-
-        var removedNodes = orphanNodes
-            .Concat(orphanRemovingNodes)
-            .Concat(toughEggShadowNodes)
-            .Distinct()
-            .ToList();
-        if (removedNodes.Count == 0)
-            return;
-
-        MainFile.Logger.Info(
-            $"Removed {removedNodes.Count} stale combat room creature node(s) after singleplayer restore for {restoreContext}: " +
-            $"{string.Join(", ", removedNodes.Select(DescribeCreatureNodeForLog))}");
     }
 
     private static SnapshotResolutionContext BuildSnapshotResolutionContext(
@@ -1858,7 +1831,7 @@ public static class SingleplayerCombatStateSnapshotService
         var resolvedSnapshots = new List<ResolvedCreatureSnapshot>();
         var usedCreatures = new HashSet<Creature>();
 
-        foreach (var snapshot in snapshots.Where(snapshot => string.Equals(snapshot.MonsterId, monsterId, StringComparison.Ordinal)))
+        foreach (var snapshot in snapshots.Where(snapshot => string.Equals(snapshot.MonsterId?.Entry, monsterId, StringComparison.Ordinal)))
         {
             var creature = ResolveCreature(combatState, snapshot, usedCreatures);
             if (creature == null)
@@ -1955,17 +1928,10 @@ public static class SingleplayerCombatStateSnapshotService
         catch (Exception e)
         {
             MainFile.Logger.Warn(
-                $"Failed to recreate missing combat room creature node during singleplayer restore. " +
-                $"Monster={snapshot.MonsterId ?? "unknown"}, Slot={snapshot.SlotName ?? "unknown"}: {e.Message}");
+                $"Failed to recreate missing combat room creature node during multiplayer restore. " +
+                $"Monster={snapshot.MonsterId?.Entry ?? "unknown"}, Slot={snapshot.SlotName ?? "unknown"}: {e.Message}");
             return new EnsuredCreatureNodeResult(combatRoomNode.GetCreatureNode(creature), false);
         }
-    }
-
-    private static string DescribeCreatureNodeForLog(NCreature node)
-    {
-        return node.Entity != null
-            ? DescribeCreatureForLog(node.Entity)
-            : node.Name.ToString();
     }
 
     private static void RemoveCreatureNodeFromCombatRoom(NCombatRoom combatRoomNode, NCreature node)
@@ -2002,21 +1968,67 @@ public static class SingleplayerCombatStateSnapshotService
         }
         catch
         {
-            // Best-effort cleanup only. The normal room-node removal path has already run.
         }
     }
 
-    private static void TryRefreshLocalCombatUi(RunState runState, CombatState combatState, int roundNumber, string restoreContext)
+    private static void RemoveCreaturesMissingFromSnapshot(
+        CombatState combatState,
+        CombatStateSnapshot snapshot,
+        string restoreContext,
+        SnapshotResolutionContext resolutionContext)
+    {
+        var snapshotEnemyCount = snapshot.Creatures.Count(creature => creature.PlayerId == null);
+        var currentEnemyCreatures = combatState.Creatures.Where(creature => creature.Player == null).ToList();
+        if (snapshotEnemyCount >= currentEnemyCreatures.Count)
+            return;
+
+        var matchedEnemies = ResolveMatchedSnapshotEnemies(combatState, snapshot.Creatures, resolutionContext);
+        var matchedEnemySet = matchedEnemies.ToHashSet();
+        var extraCreatures = currentEnemyCreatures.Where(creature => !matchedEnemySet.Contains(creature)).ToList();
+        if (extraCreatures.Count == 0)
+            return;
+
+        foreach (var creature in extraCreatures)
+            RemoveCreatureFromCombatState(combatState, creature, restoreContext);
+
+        if (snapshot.EncounterSlots.Count > 0)
+            combatState.SortEnemiesBySlotName();
+    }
+
+    private static List<Creature> ResolveMatchedSnapshotEnemies(
+        CombatState combatState,
+        IReadOnlyList<CombatCreatureSnapshot> snapshots,
+        SnapshotResolutionContext resolutionContext)
+    {
+        var matchedCreatures = new List<Creature>();
+        var usedCreatures = new HashSet<Creature>();
+
+        foreach (var snapshot in snapshots.Where(snapshot => snapshot.PlayerId == null))
+        {
+            var creature = ResolveCreature(combatState, snapshot, resolutionContext, usedCreatures);
+            if (creature == null)
+                continue;
+
+            matchedCreatures.Add(creature);
+            usedCreatures.Add(creature);
+        }
+
+        return matchedCreatures;
+    }
+
+    private static void RemoveCreatureFromCombatState(CombatState combatState, Creature creature, string restoreContext)
     {
         try
         {
-            RebuildLocalHandUi(runState);
-            RefreshCombatUiState(combatState);
-            ShowPlayerTurnBannerIfNeeded(roundNumber);
+            CombatManager.Instance.RemoveCreature(creature);
+            if (CombatStateCompatibilityService.BelongsToCombatState(creature, combatState))
+                combatState.RemoveCreature(creature, true);
         }
         catch (Exception e)
         {
-            MainFile.Logger.Warn($"Failed to refresh singleplayer combat UI for {restoreContext}: {e.Message}");
+            MainFile.Logger.Warn(
+                $"Failed to fully remove creature during multiplayer combat snapshot restore for {restoreContext}. " +
+                $"Monster={creature.Monster?.Id.Entry ?? "unknown"}, Slot={creature.SlotName ?? "unknown"}: {e.Message}");
         }
     }
 
@@ -2028,7 +2040,6 @@ public static class SingleplayerCombatStateSnapshotService
         string restoreContext)
     {
         await Task.Delay(FollowUpUiRefreshDelayMs);
-
         if (!TryGetReadyRestoreContext(runState, out var readyContext))
             return;
 
@@ -2036,39 +2047,6 @@ public static class SingleplayerCombatStateSnapshotService
             return;
 
         TryRefreshLocalCombatUi(runState, expectedCombatState, roundNumber, $"{restoreContext} follow-up");
-    }
-
-    private static void RebuildLocalHandUi(RunState runState)
-    {
-        var handUi = NPlayerHand.Instance;
-        var localPlayer = LocalContext.GetMe(runState);
-        if (handUi == null || localPlayer?.PlayerCombatState == null)
-            return;
-
-        handUi.CancelAllCardPlay();
-
-        foreach (var holder in handUi.ActiveHolders.ToList())
-        {
-            var cardModel = holder.CardModel;
-            if (cardModel != null)
-                handUi.Remove(cardModel);
-        }
-
-        var handPile = CardPile.Get(PileType.Hand, localPlayer);
-        if (handPile == null)
-            return;
-
-        for (var index = 0; index < handPile.Cards.Count; index++)
-        {
-            var card = handPile.Cards[index];
-            var cardNode = NCard.Create(card, ModelVisibility.Visible);
-            if (cardNode == null)
-                continue;
-
-            handUi.Add(cardNode, index);
-        }
-
-        handUi.ForceRefreshCardIndices();
     }
 
     private static void RefreshCombatUiState(CombatState combatState)
@@ -2099,36 +2077,6 @@ public static class SingleplayerCombatStateSnapshotService
         }
 
         combatRoom.AddChild(banner);
-    }
-
-    private static void RegisterCardInCombatState(CardModel card)
-    {
-        CombatStateAddCardMethod?.Invoke(CombatStateCompatibilityService.GetRawCombatState(card.Owner?.Creature), [card]);
-    }
-
-    private static bool? GetHandCanPlayCardsState()
-    {
-        return InvokeBooleanMethod(HandCanPlayCardsMethod, NPlayerHand.Instance);
-    }
-
-    private static bool? GetHandActionsAllowedState()
-    {
-        return InvokeBooleanMethod(HandAreCardActionsAllowedMethod, NPlayerHand.Instance);
-    }
-
-    private static bool? InvokeBooleanMethod(MethodInfo? method, object? target)
-    {
-        if (method == null || target == null)
-            return null;
-
-        try
-        {
-            return method.Invoke(target, null) is bool value ? value : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static Creature? ResolveCreature(CombatState combatState, CombatCreatureSnapshot snapshot)
@@ -2189,7 +2137,7 @@ public static class SingleplayerCombatStateSnapshotService
         }
 
         var byMonsterId = combatState.Creatures
-            .Where(creature => creature.Player == null && creature.Monster?.Id.Entry == snapshot.MonsterId)
+            .Where(creature => creature.Player == null && creature.Monster?.Id == snapshot.MonsterId)
             .Where(creature => excludedCreatures == null || !excludedCreatures.Contains(creature))
             .ToList();
         if (byMonsterId.Count == 0)
@@ -2200,9 +2148,76 @@ public static class SingleplayerCombatStateSnapshotService
             : byMonsterId[0];
     }
 
+    private static Creature? ResolveCreatureReference(CombatState combatState, CombatCreatureReferenceSnapshot reference)
+    {
+        if (reference.PlayerId.HasValue)
+        {
+            return combatState.Creatures.FirstOrDefault(creature =>
+                creature.Player?.NetId == reference.PlayerId.Value);
+        }
+
+        if (reference.CombatId.HasValue)
+        {
+            var byCombatId = combatState.Creatures.FirstOrDefault(creature =>
+                creature.Player == null
+                && creature.CombatId == reference.CombatId.Value);
+            if (byCombatId != null)
+                return byCombatId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(reference.SlotName))
+        {
+            var bySlot = combatState.Creatures.FirstOrDefault(creature =>
+                creature.Player == null
+                && string.Equals(creature.SlotName, reference.SlotName, StringComparison.Ordinal));
+            if (bySlot != null)
+                return bySlot;
+        }
+
+        var byMonsterId = combatState.Creatures
+            .Where(creature => creature.Player == null && creature.Monster?.Id == reference.MonsterId)
+            .ToList();
+        if (byMonsterId.Count == 0)
+            return null;
+
+        return reference.MonsterInstanceIndex >= 0 && reference.MonsterInstanceIndex < byMonsterId.Count
+            ? byMonsterId[reference.MonsterInstanceIndex]
+            : byMonsterId[0];
+    }
+
+    private static int GetMonsterInstanceIndex(Creature creature)
+    {
+        if (creature.Player != null || creature.Monster?.Id == null || creature.CombatState == null)
+            return 0;
+
+        var matchingCreatures = creature.CombatState.Creatures
+            .Where(entry => entry.Player == null && entry.Monster?.Id == creature.Monster.Id)
+            .ToList();
+        var index = matchingCreatures.IndexOf(creature);
+        return index >= 0 ? index : 0;
+    }
+
+    private static int? CaptureTenderCardsPlayedThisTurn(TenderPower tenderPower)
+    {
+        try
+        {
+            if (TenderPowerCardsPlayedThisTurnProperty?.GetValue(tenderPower) is int propertyValue)
+                return propertyValue;
+
+            if (TenderPowerCardsPlayedThisTurnField?.GetValue(tenderPower) is int fieldValue)
+                return fieldValue;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to capture cards-played count for tender power: {e.Message}");
+        }
+
+        return null;
+    }
+
     private static List<SpecialFieldSnapshot> CaptureSpecialMonsterFields(MonsterModel monster)
     {
-        if (!SingleplayerPreviousStepSpecialSnapshotRegistry.TryGetMonsterPrivateFields(monster.Id.Entry, out var fieldNames))
+        if (!MultiplayerPreviousStepSpecialSnapshotRegistry.TryGetMonsterPrivateFields(monster.Id.Entry, out var fieldNames))
             return [];
 
         return CaptureFields(monster, fieldNames);
@@ -2211,14 +2226,12 @@ public static class SingleplayerCombatStateSnapshotService
     private static List<SpecialFieldSnapshot> CaptureFields(object target, IReadOnlyList<string> fieldNames)
     {
         var snapshots = new List<SpecialFieldSnapshot>();
-        var targetType = target.GetType();
         foreach (var fieldName in fieldNames)
         {
-            var field = targetType.GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-            if (field == null)
+            if (!TryResolveFieldPath(target, fieldName, out var fieldOwner, out var field))
                 continue;
 
-            var value = field.GetValue(target);
+            var value = field.GetValue(fieldOwner);
             if (value == null)
                 continue;
 
@@ -2235,9 +2248,7 @@ public static class SingleplayerCombatStateSnapshotService
     private static bool TryReadSpecialFieldInt(IReadOnlyList<SpecialFieldSnapshot> fieldSnapshots, string fieldName, out int value)
     {
         value = default;
-
-        var snapshot = fieldSnapshots.FirstOrDefault(field =>
-            string.Equals(field.FieldName, fieldName, StringComparison.Ordinal));
+        var snapshot = fieldSnapshots.FirstOrDefault(field => string.Equals(field.FieldName, fieldName, StringComparison.Ordinal));
         if (snapshot == null)
             return false;
 
@@ -2255,9 +2266,7 @@ public static class SingleplayerCombatStateSnapshotService
     private static bool TryReadSpecialFieldBool(IReadOnlyList<SpecialFieldSnapshot> fieldSnapshots, string fieldName, out bool value)
     {
         value = default;
-
-        var snapshot = fieldSnapshots.FirstOrDefault(field =>
-            string.Equals(field.FieldName, fieldName, StringComparison.Ordinal));
+        var snapshot = fieldSnapshots.FirstOrDefault(field => string.Equals(field.FieldName, fieldName, StringComparison.Ordinal));
         if (snapshot == null)
             return false;
 
@@ -2274,19 +2283,102 @@ public static class SingleplayerCombatStateSnapshotService
 
     private static void TryRestoreField(object target, SpecialFieldSnapshot fieldSnapshot, string logContext)
     {
-        var field = target.GetType().GetField(fieldSnapshot.FieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-        if (field == null)
+        if (!TryResolveFieldPath(target, fieldSnapshot.FieldName, out var fieldOwner, out var field))
             return;
 
         try
         {
             var value = JsonSerializer.Deserialize(fieldSnapshot.ValueJson, field.FieldType);
-            field.SetValue(target, value);
+            field.SetValue(fieldOwner, value);
         }
         catch (Exception e)
         {
             MainFile.Logger.Warn($"Failed to restore {logContext} field {fieldSnapshot.FieldName}: {e.Message}");
         }
+    }
+
+    private static bool TrySetFieldValueByPath(object target, string fieldPath, object? value)
+    {
+        if (!TryResolveFieldPath(target, fieldPath, out var fieldOwner, out var field))
+            return false;
+
+        field.SetValue(fieldOwner, value);
+        return true;
+    }
+
+    private static bool TryResolveFieldPath(object target, string fieldPath, out object fieldOwner, out FieldInfo field)
+    {
+        fieldOwner = target;
+        field = null!;
+
+        if (string.IsNullOrWhiteSpace(fieldPath))
+            return false;
+
+        var currentOwner = target;
+        var segments = fieldPath.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0)
+            return false;
+
+        for (var index = 0; index < segments.Length; index++)
+        {
+            var segment = segments[index];
+            var currentField = FindInstanceField(currentOwner.GetType(), segment);
+            if (currentField == null)
+                return false;
+
+            if (index == segments.Length - 1)
+            {
+                fieldOwner = currentOwner;
+                field = currentField;
+                return true;
+            }
+
+            currentOwner = currentField.GetValue(currentOwner)!;
+            if (currentOwner == null)
+                return false;
+        }
+
+        return false;
+    }
+
+    private static FieldInfo? FindInstanceField(Type type, string fieldName)
+    {
+        for (var currentType = type; currentType != null; currentType = currentType.BaseType)
+        {
+            var field = currentType.GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly);
+            if (field != null)
+                return field;
+        }
+
+        return null;
+    }
+
+    private static object? GetPowerInternalData(PowerModel power)
+    {
+        try
+        {
+            return PowerModelInternalDataField?.GetValue(power);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to read power internal data for {power.Id}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static bool TryGetPowerInternalDataFieldValue<T>(PowerModel power, string fieldName, out T? value)
+    {
+        value = default;
+        var internalData = GetPowerInternalData(power);
+        if (internalData == null)
+            return false;
+
+        var field = FindInstanceField(internalData.GetType(), fieldName);
+        if (field?.GetValue(internalData) is not T typedValue)
+            return false;
+
+        value = typedValue;
+        return true;
     }
 
     private static void TryRestoreBooleanMember(
@@ -2316,18 +2408,223 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    public sealed class CombatStateSnapshot
+    private static bool TryReadBoolField(FieldInfo? field, object? target)
     {
-        public List<CombatCreatureSnapshot> Creatures { get; set; } = [];
-        public List<CombatPlayerSnapshot> Players { get; set; } = [];
+        if (field == null || target == null)
+            return false;
+
+        try
+        {
+            return field.GetValue(target) is bool value && value;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to read reflected bool field {field.Name}: {e.Message}");
+            return false;
+        }
+    }
+
+    private static bool? TryReadNullableBoolField(FieldInfo? field, object? target)
+    {
+        if (field == null || target == null)
+            return null;
+
+        try
+        {
+            return ReadBooleanMember(field.GetValue(target));
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to read reflected nullable bool field {field.Name}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static bool? TryReadBoolProperty(PropertyInfo? property, object? target)
+    {
+        if (property == null || target == null)
+            return null;
+
+        try
+        {
+            return ReadBooleanMember(property.GetValue(target));
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to read reflected bool property {property.Name}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static bool? ReadBooleanMember(object? value)
+    {
+        return value is bool boolValue ? boolValue : null;
+    }
+
+    private static List<DynamicVarSnapshot> CaptureDynamicVars(DynamicVarSet dynamicVars)
+    {
+        var snapshots = new List<DynamicVarSnapshot>();
+        foreach (var (name, dynamicVar) in dynamicVars)
+        {
+            snapshots.Add(new DynamicVarSnapshot
+            {
+                Name = name,
+                BaseValue = dynamicVar.BaseValue,
+                HasStringValue = dynamicVar is StringVar,
+                StringValue = dynamicVar is StringVar stringVar ? stringVar.StringValue : null
+            });
+        }
+
+        return snapshots;
+    }
+
+    private static void CaptureComplexPowerState(CombatPowerSnapshot snapshot, PowerModel actualPower)
+    {
+        if (actualPower is NightmarePower
+            && TryGetPowerInternalDataFieldValue<CardModel>(actualPower, "selectedCard", out var selectedCard)
+            && selectedCard != null)
+        {
+            snapshot.NightmareSelectedCard = CombatCardSnapshot.FromCard(selectedCard);
+        }
+
+        if (actualPower is VitalSparkPower
+            && TryGetPowerInternalDataFieldValue<ISet<Player>>(actualPower, "playersTriggeredThisTurn", out var triggeredPlayers)
+            && triggeredPlayers is { Count: > 0 })
+        {
+            snapshot.VitalSparkTriggeredPlayerIds = triggeredPlayers.Select(player => player.NetId).ToList();
+        }
+
+        var creatureDecimalFieldName = actualPower switch
+        {
+            PossessStrengthPower => "stolenStrength",
+            PossessSpeedPower => "stolenDexterity",
+            _ => null
+        };
+        if (creatureDecimalFieldName != null
+            && TryGetPowerInternalDataFieldValue<IDictionary<Creature, decimal>>(actualPower, creatureDecimalFieldName, out var creatureDecimalEntries)
+            && creatureDecimalEntries is { Count: > 0 })
+        {
+            snapshot.CreatureDecimalEntries = CaptureCreatureDecimalEntries(creatureDecimalEntries);
+        }
+
+        if (TryGetTrackedCardIntMapFieldName(actualPower, out var cardMapFieldName)
+            && TryGetPowerInternalDataFieldValue<IDictionary<CardModel, int>>(actualPower, cardMapFieldName, out var cardIntEntries)
+            && cardIntEntries is { Count: > 0 })
+        {
+            snapshot.CardIntEntries = CaptureLiveCardValueEntries(cardIntEntries);
+        }
+
+        if (actualPower is DampenPower
+            && TryGetPowerInternalDataFieldValue<ISet<Creature>>(actualPower, "casters", out var dampenCasters)
+            && dampenCasters is { Count: > 0 })
+        {
+            snapshot.DampenCasterReferences = dampenCasters
+                .Select(CombatCreatureReferenceSnapshot.FromCreature)
+                .Where(reference => reference != null)
+                .Cast<CombatCreatureReferenceSnapshot>()
+                .ToList();
+        }
+    }
+
+    private static List<CombatCreatureDecimalSnapshot> CaptureCreatureDecimalEntries(IDictionary<Creature, decimal> entries)
+    {
+        var snapshots = new List<CombatCreatureDecimalSnapshot>();
+        foreach (var (creature, value) in entries)
+        {
+            var reference = CombatCreatureReferenceSnapshot.FromCreature(creature);
+            if (reference == null)
+                continue;
+
+            snapshots.Add(new CombatCreatureDecimalSnapshot
+            {
+                Creature = reference,
+                Value = value
+            });
+        }
+
+        return snapshots;
+    }
+
+    private static List<CombatLiveCardValueSnapshot> CaptureLiveCardValueEntries(IDictionary<CardModel, int> entries)
+    {
+        var snapshots = new List<CombatLiveCardValueSnapshot>();
+        foreach (var (card, value) in entries)
+        {
+            var reference = CaptureLiveCardReference(card);
+            if (reference == null)
+                continue;
+
+            snapshots.Add(new CombatLiveCardValueSnapshot
+            {
+                Card = reference,
+                Value = value
+            });
+        }
+
+        return snapshots;
+    }
+
+    private static ModelId? CaptureLastSpawnedMonsterId(Fabricator fabricator)
+    {
+        if (!TryResolveFieldPath(fabricator, "_lastSpawned", out var fieldOwner, out var field))
+            return null;
+
+        return field.GetValue(fieldOwner) is MonsterModel lastSpawnedMonster ? lastSpawnedMonster.Id : null;
+    }
+
+    public sealed class CombatManagerSnapshot
+    {
+        public SpecialFieldSnapshot? PlayerActionsDisabledField { get; set; }
+        public SpecialFieldSnapshot? PlayersReadyToEndTurnField { get; set; }
+        public SpecialFieldSnapshot? PlayersReadyToBeginEnemyTurnField { get; set; }
+        public bool? IsPlayPhase { get; set; }
+        public bool? IsEnemyTurnStarted { get; set; }
+        public bool? EndingPlayerTurnPhaseOne { get; set; }
+        public bool? EndingPlayerTurnPhaseTwo { get; set; }
+
+        public static CombatManagerSnapshot? Capture()
+        {
+            var combatManager = CombatManager.Instance;
+            if (combatManager == null)
+                return null;
+
+            return new CombatManagerSnapshot
+            {
+                PlayerActionsDisabledField = CaptureField(combatManager, CombatManagerPlayerActionsDisabledField),
+                PlayersReadyToEndTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToEndTurnField),
+                PlayersReadyToBeginEnemyTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToBeginEnemyTurnField),
+                IsPlayPhase = TryReadBoolProperty(CombatManagerIsPlayPhaseProperty, combatManager)
+                    ?? TryReadNullableBoolField(CombatManagerIsPlayPhaseField, combatManager),
+                IsEnemyTurnStarted = TryReadBoolProperty(CombatManagerIsEnemyTurnStartedProperty, combatManager)
+                    ?? TryReadNullableBoolField(CombatManagerIsEnemyTurnStartedField, combatManager),
+                EndingPlayerTurnPhaseOne = TryReadBoolProperty(CombatManagerEndingPlayerTurnPhaseOneProperty, combatManager)
+                    ?? TryReadNullableBoolField(CombatManagerEndingPlayerTurnPhaseOneField, combatManager),
+                EndingPlayerTurnPhaseTwo = TryReadBoolProperty(CombatManagerEndingPlayerTurnPhaseTwoProperty, combatManager)
+                    ?? TryReadNullableBoolField(CombatManagerEndingPlayerTurnPhaseTwoField, combatManager)
+            };
+        }
+
+        private static SpecialFieldSnapshot? CaptureField(object target, FieldInfo? field)
+        {
+            if (field == null)
+                return null;
+
+            var value = field.GetValue(target);
+            if (value == null)
+                return null;
+
+            return new SpecialFieldSnapshot
+            {
+                FieldName = field.Name,
+                ValueJson = JsonSerializer.Serialize(value, field.FieldType)
+            };
+        }
+    }
+
+    public sealed partial class CombatStateSnapshot
+    {
         public List<string> EncounterSlots { get; set; } = [];
-        public SerializableRunRngSet Rng { get; set; } = new();
         public CombatManagerSnapshot? CombatManager { get; set; }
-        public int RoundNumber { get; set; }
-        public CombatSide CurrentSide { get; set; }
-        public List<uint> NextChoiceIds { get; set; } = [];
-        public uint? LastExecutedHookId { get; set; }
-        public uint? LastExecutedActionId { get; set; }
 
         public static CombatStateSnapshot FromCurrentRun(RunState runState)
         {
@@ -2410,73 +2707,19 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    public sealed class CombatManagerSnapshot
+    public sealed partial class CombatCreatureSnapshot
     {
-        public SpecialFieldSnapshot? PlayerActionsDisabledField { get; set; }
-        public SpecialFieldSnapshot? PlayersReadyToEndTurnField { get; set; }
-        public SpecialFieldSnapshot? PlayersReadyToBeginEnemyTurnField { get; set; }
-        public bool? IsPlayPhase { get; set; }
-        public bool? IsEnemyTurnStarted { get; set; }
-        public bool? EndingPlayerTurnPhaseOne { get; set; }
-        public bool? EndingPlayerTurnPhaseTwo { get; set; }
-
-        public static CombatManagerSnapshot? Capture()
-        {
-            var combatManager = CombatManager.Instance;
-            if (combatManager == null)
-                return null;
-
-            return new CombatManagerSnapshot
-            {
-                PlayerActionsDisabledField = CaptureField(combatManager, CombatManagerPlayerActionsDisabledField),
-                PlayersReadyToEndTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToEndTurnField),
-                PlayersReadyToBeginEnemyTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToBeginEnemyTurnField),
-                IsPlayPhase = TryReadBoolProperty(CombatManagerIsPlayPhaseProperty, combatManager)
-                    ?? TryReadNullableBoolField(CombatManagerIsPlayPhaseField, combatManager),
-                IsEnemyTurnStarted = TryReadBoolProperty(CombatManagerIsEnemyTurnStartedProperty, combatManager)
-                    ?? TryReadNullableBoolField(CombatManagerIsEnemyTurnStartedField, combatManager),
-                EndingPlayerTurnPhaseOne = TryReadBoolProperty(CombatManagerEndingPlayerTurnPhaseOneProperty, combatManager)
-                    ?? TryReadNullableBoolField(CombatManagerEndingPlayerTurnPhaseOneField, combatManager),
-                EndingPlayerTurnPhaseTwo = TryReadBoolProperty(CombatManagerEndingPlayerTurnPhaseTwoProperty, combatManager)
-                    ?? TryReadNullableBoolField(CombatManagerEndingPlayerTurnPhaseTwoField, combatManager)
-            };
-        }
-
-        private static SpecialFieldSnapshot? CaptureField(object target, FieldInfo? field)
-        {
-            if (field == null)
-                return null;
-
-            var value = field.GetValue(target);
-            if (value == null)
-                return null;
-
-            return new SpecialFieldSnapshot
-            {
-                FieldName = field.Name,
-                ValueJson = JsonSerializer.Serialize(value, field.FieldType)
-            };
-        }
-    }
-
-    public sealed class CombatCreatureSnapshot
-    {
-        public string? MonsterId { get; set; }
         public int MonsterInstanceIndex { get; set; }
         public uint? CombatId { get; set; }
         public string? SlotName { get; set; }
         public string? CurrentMoveFollowUpStateId { get; set; }
         public bool IsTemporaryStunned { get; set; }
-        public ulong? PlayerId { get; set; }
-        public int CurrentHp { get; set; }
-        public int MaxHp { get; set; }
-        public int Block { get; set; }
-        public List<CombatPowerSnapshot> Powers { get; set; } = [];
         public string? CurrentMoveStateId { get; set; }
         public List<string> MoveStateLogIds { get; set; } = [];
         public bool PerformedFirstMove { get; set; }
         public List<SpecialFieldSnapshot> SpecialFields { get; set; } = [];
         public CombatVector2Snapshot? NodeGlobalPosition { get; set; }
+        public ModelId? FabricatorLastSpawnedMonsterId { get; set; }
 
         public static CombatCreatureSnapshot FromNetState(NetFullCombatState.CreatureState state, Creature? creature, int monsterInstanceIndex)
         {
@@ -2484,7 +2727,7 @@ public static class SingleplayerCombatStateSnapshotService
             var creatureNode = creature != null ? NCombatRoom.Instance?.GetCreatureNode(creature) : null;
             return new CombatCreatureSnapshot
             {
-                MonsterId = state.monsterId?.Entry,
+                MonsterId = state.monsterId,
                 MonsterInstanceIndex = monsterInstanceIndex,
                 CombatId = creature?.CombatId,
                 SlotName = creature?.SlotName,
@@ -2501,6 +2744,9 @@ public static class SingleplayerCombatStateSnapshotService
                 SpecialFields = creature?.Monster != null ? CaptureSpecialMonsterFields(creature.Monster) : [],
                 NodeGlobalPosition = creature?.Monster is ToughEgg
                     ? CombatVector2Snapshot.FromVector2(creatureNode?.GlobalPosition)
+                    : null,
+                FabricatorLastSpawnedMonsterId = creature?.Monster is Fabricator fabricator
+                    ? CaptureLastSpawnedMonsterId(fabricator)
                     : null
             };
         }
@@ -2519,65 +2765,19 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    private static bool TryReadBoolField(FieldInfo? field, object? target)
+    public sealed partial class CombatPowerSnapshot
     {
-        if (field == null || target == null)
-            return false;
-
-        try
-        {
-            return field.GetValue(target) is bool value && value;
-        }
-        catch (Exception e)
-        {
-            MainFile.Logger.Warn($"Failed to read reflected bool field {field.Name}: {e.Message}");
-            return false;
-        }
-    }
-
-    private static bool? TryReadNullableBoolField(FieldInfo? field, object? target)
-    {
-        if (field == null || target == null)
-            return null;
-
-        try
-        {
-            return ReadBooleanMember(field.GetValue(target));
-        }
-        catch (Exception e)
-        {
-            MainFile.Logger.Warn($"Failed to read reflected nullable bool field {field.Name}: {e.Message}");
-            return null;
-        }
-    }
-
-    private static bool? TryReadBoolProperty(PropertyInfo? property, object? target)
-    {
-        if (property == null || target == null)
-            return null;
-
-        try
-        {
-            return ReadBooleanMember(property.GetValue(target));
-        }
-        catch (Exception e)
-        {
-            MainFile.Logger.Warn($"Failed to read reflected bool property {property.Name}: {e.Message}");
-            return null;
-        }
-    }
-
-    private static bool? ReadBooleanMember(object? value)
-    {
-        return value is bool boolValue ? boolValue : null;
-    }
-
-    public sealed class CombatPowerSnapshot
-    {
-        public ModelId Id { get; set; }
-        public int Amount { get; set; }
+        public CombatCreatureReferenceSnapshot? Applier { get; set; }
         public ulong? TargetPlayerId { get; set; }
+        public int? ThieveryStolenGold { get; set; }
+        public int? TenderCardsPlayedThisTurn { get; set; }
         public CombatCardSnapshot? SwipeStolenCard { get; set; }
+        public List<DynamicVarSnapshot> DynamicVars { get; set; } = [];
+        public CombatCardSnapshot? NightmareSelectedCard { get; set; }
+        public List<ulong>? VitalSparkTriggeredPlayerIds { get; set; }
+        public List<CombatCreatureDecimalSnapshot>? CreatureDecimalEntries { get; set; }
+        public List<CombatLiveCardValueSnapshot>? CardIntEntries { get; set; }
+        public List<CombatCreatureReferenceSnapshot>? DampenCasterReferences { get; set; }
         public List<SpecialFieldSnapshot> SpecialFields { get; set; } = [];
 
         public static CombatPowerSnapshot FromNetState(NetFullCombatState.PowerState state, PowerModel? actualPower)
@@ -2585,12 +2785,19 @@ public static class SingleplayerCombatStateSnapshotService
             var snapshot = new CombatPowerSnapshot
             {
                 Id = state.id,
-                Amount = state.amount
+                Amount = state.amount,
+                Applier = CombatCreatureReferenceSnapshot.FromCreature(actualPower?.Applier),
+                DynamicVars = actualPower != null ? CaptureDynamicVars(actualPower.DynamicVars) : []
             };
 
             if (actualPower is ThieveryPower thieveryPower)
             {
                 snapshot.TargetPlayerId = thieveryPower.Target?.Player?.NetId;
+                snapshot.ThieveryStolenGold = thieveryPower.DynamicVars.Gold.IntValue;
+            }
+            else if (actualPower is HeistPower heistPower)
+            {
+                snapshot.TargetPlayerId = heistPower.Target?.Player?.NetId;
             }
             else if (actualPower is SwipePower swipePower)
             {
@@ -2602,14 +2809,157 @@ public static class SingleplayerCombatStateSnapshotService
                 snapshot.TargetPlayerId = sandpitPower.Target?.Player?.NetId;
             }
 
+            if (actualPower is TenderPower tenderPower)
+                snapshot.TenderCardsPlayedThisTurn = CaptureTenderCardsPlayedThisTurn(tenderPower);
+
+            if (actualPower != null)
+                CaptureComplexPowerState(snapshot, actualPower);
+
             if (actualPower != null
-                && SingleplayerPreviousStepSpecialSnapshotRegistry.TryGetPowerPrivateFields(actualPower.Id.Entry, out var powerFieldNames))
+                && MultiplayerPreviousStepSpecialSnapshotRegistry.TryGetPowerPrivateFields(actualPower.Id.Entry, out var powerFieldNames))
             {
                 snapshot.SpecialFields = CaptureFields(actualPower, powerFieldNames);
             }
 
             return snapshot;
         }
+    }
+
+    public sealed class CombatCreatureReferenceSnapshot
+    {
+        public ulong? PlayerId { get; set; }
+        public uint? CombatId { get; set; }
+        public string? SlotName { get; set; }
+        public ModelId? MonsterId { get; set; }
+        public int MonsterInstanceIndex { get; set; }
+
+        public static CombatCreatureReferenceSnapshot? FromCreature(Creature? creature)
+        {
+            if (creature == null)
+                return null;
+
+            return new CombatCreatureReferenceSnapshot
+            {
+                PlayerId = creature.Player?.NetId,
+                CombatId = creature.Player == null ? creature.CombatId : null,
+                SlotName = creature.Player == null ? creature.SlotName : null,
+                MonsterId = creature.Monster?.Id,
+                MonsterInstanceIndex = GetMonsterInstanceIndex(creature)
+            };
+        }
+    }
+
+    public sealed partial class CombatPlayerSnapshot
+    {
+        public static CombatPlayerSnapshot FromNetState(NetFullCombatState.PlayerState state, Player? actualPlayer)
+        {
+            return new CombatPlayerSnapshot
+            {
+                PlayerId = state.playerId,
+                CharacterId = state.characterId,
+                Energy = state.energy,
+                Stars = state.stars,
+                MaxStars = state.maxStars,
+                MaxPotionCount = state.maxPotionCount,
+                Gold = state.gold,
+                Piles = state.piles.Select(pileState =>
+                    CombatPileSnapshot.FromNetState(
+                        pileState,
+                        actualPlayer))
+                    .ToList(),
+                Potions = state.potions.Select(CombatPotionSnapshot.FromNetState).ToList(),
+                Relics = state.relics.Select(CombatRelicSnapshot.FromNetState).ToList(),
+                Orbs = state.orbs.Select(CombatOrbSnapshot.FromNetState).ToList(),
+                RngSet = state.rngSet,
+                OddsSet = ResolveOddsSet(state.playerId),
+                RelicGrabBag = state.relicGrabBag
+            };
+        }
+    }
+
+    public sealed partial class CombatPileSnapshot
+    {
+        public static CombatPileSnapshot FromNetState(NetFullCombatState.CombatPileState state, Player? actualPlayer)
+        {
+            var actualPile = actualPlayer != null ? CardPile.Get(state.pileType, actualPlayer) : null;
+            var cards = new List<CombatCardSnapshot>();
+            for (var index = 0; index < state.cards.Count; index++)
+            {
+                var actualCard = actualPile != null && index < actualPile.Cards.Count
+                    ? actualPile.Cards[index]
+                    : null;
+                cards.Add(CombatCardSnapshot.FromNetState(state.cards[index], actualCard, actualPlayer));
+            }
+
+            return new CombatPileSnapshot
+            {
+                PileType = state.pileType,
+                Cards = cards
+            };
+        }
+    }
+
+    public sealed partial class CombatCardSnapshot
+    {
+        public bool HadDeckVersion { get; set; }
+        public SerializableCard? DeckVersionCard { get; set; }
+
+        public static CombatCardSnapshot FromNetState(NetFullCombatState.CardState state, CardModel? actualCard, Player? actualPlayer)
+        {
+            return new CombatCardSnapshot
+            {
+                Card = MultiplayerSerializableCardStateService.CaptureCombatCard(state.card, actualCard, actualPlayer),
+                HadDeckVersion = actualCard?.DeckVersion != null,
+                DeckVersionCard = MultiplayerSerializableCardStateService.CaptureLiveCard(actualCard?.DeckVersion),
+                Affliction = state.affliction,
+                AfflictionCount = state.afflictionCount,
+                Keywords = state.keywords?.ToList()
+            };
+        }
+
+        public static CombatCardSnapshot? FromCard(CardModel? card)
+        {
+            if (card == null)
+                return null;
+
+            return new CombatCardSnapshot
+            {
+                Card = MultiplayerSerializableCardStateService.CaptureLiveCard(card)!,
+                HadDeckVersion = card.DeckVersion != null,
+                DeckVersionCard = MultiplayerSerializableCardStateService.CaptureLiveCard(card.DeckVersion),
+                Affliction = card.Affliction?.Id,
+                AfflictionCount = card.Affliction?.Amount ?? 0,
+                Keywords = card.Keywords.ToList()
+            };
+        }
+    }
+
+    public sealed class DynamicVarSnapshot
+    {
+        public string Name { get; set; } = string.Empty;
+        public decimal BaseValue { get; set; }
+        public bool HasStringValue { get; set; }
+        public string? StringValue { get; set; }
+    }
+
+    public sealed class CombatLiveCardReferenceSnapshot
+    {
+        public ulong PlayerId { get; set; }
+        public PileType PileType { get; set; }
+        public int CardIndex { get; set; }
+        public CombatCardSnapshot? Card { get; set; }
+    }
+
+    public sealed class CombatLiveCardValueSnapshot
+    {
+        public CombatLiveCardReferenceSnapshot? Card { get; set; }
+        public int Value { get; set; }
+    }
+
+    public sealed class CombatCreatureDecimalSnapshot
+    {
+        public CombatCreatureReferenceSnapshot? Creature { get; set; }
+        public decimal Value { get; set; }
     }
 
     public sealed class CombatVector2Snapshot
@@ -2632,161 +2982,6 @@ public static class SingleplayerCombatStateSnapshotService
         public Vector2 ToVector2()
         {
             return new Vector2(X, Y);
-        }
-    }
-
-    public sealed class CombatPlayerSnapshot
-    {
-        public ulong PlayerId { get; set; }
-        public ModelId CharacterId { get; set; }
-        public int Energy { get; set; }
-        public int Stars { get; set; }
-        public int MaxStars { get; set; }
-        public int MaxPotionCount { get; set; }
-        public int Gold { get; set; }
-        public List<CombatPileSnapshot> Piles { get; set; } = [];
-        public List<CombatPotionSnapshot> Potions { get; set; } = [];
-        public List<CombatRelicSnapshot> Relics { get; set; } = [];
-        public List<CombatOrbSnapshot> Orbs { get; set; } = [];
-        public SerializablePlayerRngSet RngSet { get; set; } = new();
-        public SerializablePlayerOddsSet OddsSet { get; set; } = new();
-        public SerializableRelicGrabBag RelicGrabBag { get; set; } = new();
-
-        public static CombatPlayerSnapshot FromNetState(NetFullCombatState.PlayerState state, Player? actualPlayer)
-        {
-            return new CombatPlayerSnapshot
-            {
-                PlayerId = state.playerId,
-                CharacterId = state.characterId,
-                Energy = state.energy,
-                Stars = state.stars,
-                MaxStars = state.maxStars,
-                MaxPotionCount = state.maxPotionCount,
-                Gold = state.gold,
-                Piles = state.piles.Select(pileState =>
-                    CombatPileSnapshot.FromNetState(
-                        pileState,
-                        actualPlayer != null ? CardPile.Get(pileState.pileType, actualPlayer) : null))
-                    .ToList(),
-                Potions = state.potions.Select(CombatPotionSnapshot.FromNetState).ToList(),
-                Relics = state.relics.Select(CombatRelicSnapshot.FromNetState).ToList(),
-                Orbs = state.orbs.Select(CombatOrbSnapshot.FromNetState).ToList(),
-                RngSet = state.rngSet,
-                OddsSet = ResolveOddsSet(state.playerId),
-                RelicGrabBag = state.relicGrabBag
-            };
-        }
-
-        private static SerializablePlayerOddsSet ResolveOddsSet(ulong playerId)
-        {
-            return RunManager.Instance.DebugOnlyGetState()?.GetPlayer(playerId)?.PlayerOdds.ToSerializable()
-                ?? new SerializablePlayerOddsSet();
-        }
-    }
-
-    public sealed class CombatPileSnapshot
-    {
-        public PileType PileType { get; set; }
-        public List<CombatCardSnapshot> Cards { get; set; } = [];
-
-        public static CombatPileSnapshot FromNetState(NetFullCombatState.CombatPileState state, CardPile? actualPile)
-        {
-            var cards = new List<CombatCardSnapshot>();
-            for (var index = 0; index < state.cards.Count; index++)
-            {
-                var actualCard = actualPile != null && index < actualPile.Cards.Count
-                    ? actualPile.Cards[index]
-                    : null;
-                cards.Add(CombatCardSnapshot.FromNetState(state.cards[index], actualCard));
-            }
-
-            return new CombatPileSnapshot
-            {
-                PileType = state.pileType,
-                Cards = cards
-            };
-        }
-    }
-
-    public sealed class CombatCardSnapshot
-    {
-        public SerializableCard Card { get; set; } = new();
-        public bool HadDeckVersion { get; set; }
-        public SerializableCard? DeckVersionCard { get; set; }
-        public ModelId? Affliction { get; set; }
-        public int AfflictionCount { get; set; }
-        public List<CardKeyword>? Keywords { get; set; }
-
-        public static CombatCardSnapshot FromNetState(NetFullCombatState.CardState state, CardModel? actualCard)
-        {
-            return new CombatCardSnapshot
-            {
-                Card = state.card,
-                HadDeckVersion = actualCard?.DeckVersion != null,
-                DeckVersionCard = actualCard?.DeckVersion?.ToSerializable(),
-                Affliction = state.affliction,
-                AfflictionCount = state.afflictionCount,
-                Keywords = state.keywords?.ToList()
-            };
-        }
-
-        public static CombatCardSnapshot? FromCard(CardModel? card)
-        {
-            if (card == null)
-                return null;
-
-            return new CombatCardSnapshot
-            {
-                Card = card.ToSerializable(),
-                HadDeckVersion = card.DeckVersion != null,
-                DeckVersionCard = card.DeckVersion?.ToSerializable(),
-                Affliction = card.Affliction?.Id,
-                AfflictionCount = card.Affliction?.Amount ?? 0,
-                Keywords = card.Keywords.ToList()
-            };
-        }
-    }
-
-    public sealed class CombatPotionSnapshot
-    {
-        public ModelId Id { get; set; }
-
-        public static CombatPotionSnapshot FromNetState(NetFullCombatState.PotionState state)
-        {
-            return new CombatPotionSnapshot
-            {
-                Id = state.id
-            };
-        }
-    }
-
-    public sealed class CombatRelicSnapshot
-    {
-        public SerializableRelic Relic { get; set; } = new();
-
-        public static CombatRelicSnapshot FromNetState(NetFullCombatState.RelicState state)
-        {
-            return new CombatRelicSnapshot
-            {
-                Relic = state.relic
-            };
-        }
-    }
-
-    public sealed class CombatOrbSnapshot
-    {
-        public ModelId Id { get; set; }
-        public int Passive { get; set; }
-        public int Evoke { get; set; }
-
-        public static CombatOrbSnapshot FromNetState(NetFullCombatState.OrbState state)
-        {
-            return new CombatOrbSnapshot
-            {
-                Id = state.id,
-                Passive = state.passive,
-                Evoke = state.evoke
-            };
         }
     }
 
@@ -2813,7 +3008,7 @@ public static class SingleplayerCombatStateSnapshotService
         public IReadOnlyList<ResolvedCreatureSnapshot> GetResolvedSnapshots(string monsterId)
         {
             return _creaturesBySnapshot
-                .Where(entry => string.Equals(entry.Key.MonsterId, monsterId, StringComparison.Ordinal))
+                .Where(entry => string.Equals(entry.Key.MonsterId?.Entry, monsterId, StringComparison.Ordinal))
                 .Select(entry => new ResolvedCreatureSnapshot(entry.Key, entry.Value))
                 .ToList();
         }
@@ -2821,5 +3016,35 @@ public static class SingleplayerCombatStateSnapshotService
 
     private readonly record struct EnsuredCreatureNodeResult(NCreature? Node, bool WasRecreated);
     private readonly record struct ResolvedCreatureSnapshot(CombatCreatureSnapshot Snapshot, Creature Creature);
-    private readonly record struct ReadySingleplayerCombatRestoreContext(CombatRoom CombatRoom, CombatState CombatState);
+    private readonly record struct ReadyMultiplayerCombatRestoreContext(CombatRoom CombatRoom, CombatState CombatState);
+
+    private static string DescribeSnapshotCreatureForLog(CombatCreatureSnapshot snapshot)
+    {
+        var monsterId = snapshot.MonsterId?.Entry ?? "unknown";
+        return string.IsNullOrWhiteSpace(snapshot.SlotName) ? monsterId : $"{monsterId}:{snapshot.SlotName}";
+    }
+
+    private static string DescribeCreatureReferenceForLog(CombatCreatureReferenceSnapshot reference)
+    {
+        if (reference.PlayerId.HasValue)
+            return $"player:{reference.PlayerId.Value}";
+
+        var monsterId = reference.MonsterId?.Entry ?? "unknown";
+        if (!string.IsNullOrWhiteSpace(reference.SlotName))
+            return $"{monsterId}:{reference.SlotName}";
+
+        if (reference.CombatId.HasValue)
+            return $"{monsterId}:combat:{reference.CombatId.Value}";
+
+        return $"{monsterId}:index:{reference.MonsterInstanceIndex}";
+    }
+
+    private static string DescribeCreatureForLog(Creature creature)
+    {
+        if (creature.Player != null)
+            return $"player:{creature.Player.NetId}";
+
+        var monsterId = creature.Monster?.Id.Entry ?? "unknown";
+        return string.IsNullOrWhiteSpace(creature.SlotName) ? monsterId : $"{monsterId}:{creature.SlotName}";
+    }
 }

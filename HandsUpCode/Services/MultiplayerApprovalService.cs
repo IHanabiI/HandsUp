@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using Godot;
 using HandsUp.HandsUpCode.Multiplayer;
 using HandsUp.HandsUpCode.Multiplayer.Messages;
@@ -68,6 +69,7 @@ public static class MultiplayerApprovalService
         _pendingApproval = null;
         _incomingApproval = null;
         _incomingApprovalPresentationScheduled = false;
+        MultiplayerExecutionWindowService.Clear("multiplayer approval service unregistered");
     }
 
     public static bool IsMultiplayerActive()
@@ -111,6 +113,16 @@ public static class MultiplayerApprovalService
             return true;
         }
 
+        var evaluationState = RunManager.Instance.DebugOnlyGetState() ?? _runState;
+        var localDecision = MultiplayerApprovalPrecheckService.Evaluate(actionKind, evaluationState);
+        if (!localDecision.CanProceed)
+        {
+            statusMessage = localDecision.StatusText;
+            if (localDecision.ShouldShowPopup)
+                ShowInfoPopup(localDecision.PopupTitle, localDecision.PopupBody);
+            return true;
+        }
+
         var requestId = Guid.NewGuid().ToString("N");
         var initiatorLabel = GetPlayerLabel(me.NetId);
         var message = new RaiseHandApprovalRequestMessage
@@ -123,11 +135,17 @@ public static class MultiplayerApprovalService
 
         try
         {
-            _pendingApproval = new PendingApproval(requestId, actionKind, initiatorLabel, teammateIds);
+            _pendingApproval = new PendingApproval(
+                requestId,
+                actionKind,
+                initiatorLabel,
+                teammateIds,
+                ApprovalRequestState.Capture(actionKind, evaluationState));
 
             foreach (var teammateId in teammateIds)
             {
-                MainFile.Logger.Info($"Sending HandsUp approval request {requestId} to teammate {teammateId} for action {actionKind}.");
+                MainFile.Logger.Info(
+                    $"Sending HandsUp approval request {requestId} to teammate {teammateId} for action {RaiseHandActionService.GetActionLabel(actionKind)}.");
                 _registeredNetService.SendMessage(message, teammateId);
             }
         }
@@ -151,7 +169,8 @@ public static class MultiplayerApprovalService
         if (senderId == _registeredNetService.NetId)
             return;
 
-        MainFile.Logger.Info($"Received HandsUp approval request {message.RequestId} from {senderId} for action {message.ActionKind}.");
+        MainFile.Logger.Info(
+            $"Received HandsUp approval request {message.RequestId} from {senderId} for action {RaiseHandActionService.GetActionLabel(message.ActionKind)}.");
         EnqueueIncomingApproval(message, senderId);
     }
 
@@ -175,7 +194,8 @@ public static class MultiplayerApprovalService
 
         if (_pendingApproval.ExpectedResponderIds.All(id => _pendingApproval.Responses.ContainsKey(id)))
         {
-            BroadcastExecuteMessage(_pendingApproval.ActionKind);
+            if (TryBuildPendingExecuteMessage(_pendingApproval, out var executeMessage))
+                BroadcastExecuteMessage(executeMessage);
             _pendingApproval = null;
         }
     }
@@ -188,7 +208,10 @@ public static class MultiplayerApprovalService
         if (senderId == _registeredNetService.NetId)
             return;
 
-        MainFile.Logger.Info($"Received HandsUp execute message from {senderId} for action {message.ActionKind}.");
+        MainFile.Logger.Info(
+            $"Received HandsUp execute message from {senderId} for action {RaiseHandActionService.GetActionLabel(message.ActionKind)}.");
+        MultiplayerExecutionWindowService.BeginExecutionWindow(
+            $"received execute for {RaiseHandActionService.GetActionLabel(message.ActionKind)} from {senderId}");
         TaskHelper.RunSafely(_executeApprovedActionAsync(message.ActionKind, message.RunJson, message.RoomJson, message.SourceRoomType, message.CombatStateJson, message.RestoreHint));
     }
 
@@ -258,7 +281,9 @@ public static class MultiplayerApprovalService
 
         verticalPopup.DisconnectSignals();
         verticalPopup.DisconnectHotkeys();
-        verticalPopup.SetText("\u4e3e\u624b\u624b", BuildApprovalBody(_incomingApproval));
+        verticalPopup.SetText(
+            RaiseHandActionService.GetConfirmPopupTitle(_incomingApproval.ActionKind),
+            BuildApprovalBody(_incomingApproval));
         verticalPopup.YesButton.IsYes = true;
         verticalPopup.NoButton.IsYes = false;
         verticalPopup.InitYesButton(new LocString("main_menu_ui", "GENERIC_POPUP.confirm"), _ => RespondToIncomingApproval(true));
@@ -281,9 +306,8 @@ public static class MultiplayerApprovalService
     {
         return
             $"[center]{message.InitiatorLabel}\u4e3e\u624b\u53eb\u505c\u4e86\u6bd4\u8d5b[/center]\n" +
-            "[center]\u88c1\u5224\uff01\u6211\u8fd8\u6709\u64cd\u4f5c\u6ca1\u6253\u51fa\u6765[/center]\n" +
             "[center]\u7533\u8bf7\u4f7f\u7528\u795e\u79d8\u529b\u91cf[/center]\n" +
-            $"[center]\u56de\u6eaf\u65f6\u95f4{GetActionDisplayText(message.ActionKind)}[/center]\n" +
+            $"{RaiseHandActionService.GetConfirmPopupBody(message.ActionKind)}\n" +
             "[center]\u4f60\u51b3\u5b9a\uff1a[/center]";
     }
 
@@ -302,21 +326,54 @@ public static class MultiplayerApprovalService
         _registeredNetService.SendMessage(response, initiatorId);
     }
 
-    private static void BroadcastExecuteMessage(RaiseHandActionKind actionKind)
+    private static bool TryBuildPendingExecuteMessage(PendingApproval pendingApproval, out RaiseHandExecuteMessage executeMessage)
+    {
+        executeMessage = default;
+
+        var currentState = RunManager.Instance.DebugOnlyGetState() ?? _runState;
+        if (!pendingApproval.RequestState.MatchesCurrent(pendingApproval.ActionKind, currentState))
+        {
+            var stateChangedDecision = MultiplayerApprovalPrecheckService.StateChanged();
+            MainFile.Logger.Info(
+                $"Discarding HandsUp approval request {pendingApproval.RequestId} for {RaiseHandActionService.GetActionLabel(pendingApproval.ActionKind)} because the local state changed before execution.");
+            ShowInfoPopup(stateChangedDecision.PopupTitle, stateChangedDecision.PopupBody);
+            return false;
+        }
+
+        var builtMessage = BuildExecuteMessage(pendingApproval.ActionKind);
+        if (builtMessage == null)
+        {
+            MainFile.Logger.Info(
+                $"Skipped broadcasting HandsUp execute message for {RaiseHandActionService.GetActionLabel(pendingApproval.ActionKind)} because no execute payload was produced.");
+            return false;
+        }
+
+        executeMessage = builtMessage.Value;
+        return true;
+    }
+
+    private static void BroadcastExecuteMessage(RaiseHandExecuteMessage executeMessage)
     {
         if (_registeredNetService == null || _executeApprovedActionAsync == null)
             return;
 
-        var executeMessage = BuildExecuteMessage(actionKind);
-        if (executeMessage == null)
-        {
-            MainFile.Logger.Info($"Skipped broadcasting HandsUp execute message for {actionKind} because no execute payload was produced.");
-            return;
-        }
+        var actionLabel = RaiseHandActionService.GetActionLabel(executeMessage.ActionKind);
+        MultiplayerExecutionWindowService.BeginExecutionWindow($"broadcasting local execute for {actionLabel}");
 
-        MainFile.Logger.Info($"Broadcasting HandsUp execute message for action {actionKind}.");
-        _registeredNetService.SendMessage(executeMessage.Value);
-        TaskHelper.RunSafely(ExecuteLocalApprovedActionAsync(executeMessage.Value));
+        MainFile.Logger.Info(
+            $"Broadcasting HandsUp execute message for action {actionLabel}.");
+
+        try
+        {
+            _registeredNetService.SendMessage(executeMessage);
+            TaskHelper.RunSafely(ExecuteLocalApprovedActionAsync(executeMessage));
+        }
+        catch
+        {
+            MultiplayerExecutionWindowService.CancelPendingExecutionWindow(
+                $"broadcast send failed for {actionLabel}");
+            throw;
+        }
     }
 
     private static async System.Threading.Tasks.Task ExecuteLocalApprovedActionAsync(RaiseHandExecuteMessage executeMessage)
@@ -325,9 +382,11 @@ public static class MultiplayerApprovalService
             return;
 
         if (_registeredNetService.Type == NetGameType.Host
-            && executeMessage.ActionKind == RaiseHandActionKind.SoftRestart)
+            && ShouldDelayHostLocalReload(executeMessage))
         {
-            MainFile.Logger.Info("Delaying host local multiplayer soft restart briefly so remote clients can enter reload before the host re-enters combat.");
+            MainFile.Logger.Info(
+                $"Delaying host local multiplayer reload briefly for {RaiseHandActionService.GetActionLabel(executeMessage.ActionKind)} " +
+                "so remote clients can enter reload before the host re-enters the restored state.");
             await System.Threading.Tasks.Task.Delay(250);
         }
 
@@ -340,21 +399,43 @@ public static class MultiplayerApprovalService
             executeMessage.RestoreHint);
     }
 
+    private static bool ShouldDelayHostLocalReload(RaiseHandExecuteMessage executeMessage)
+    {
+        if (executeMessage.ActionKind == RaiseHandActionKind.SoftRestart)
+            return true;
+
+        return executeMessage.ActionKind == RaiseHandActionKind.PreviousStep
+               && string.IsNullOrWhiteSpace(executeMessage.RoomJson);
+    }
+
     private static RaiseHandExecuteMessage? BuildExecuteMessage(RaiseHandActionKind actionKind)
     {
         try
         {
+            var evaluationState = RunManager.Instance.DebugOnlyGetState() ?? _runState;
+            var localDecision = MultiplayerApprovalPrecheckService.Evaluate(actionKind, evaluationState);
+            if (!localDecision.CanProceed)
+            {
+                if (localDecision.ShouldShowPopup)
+                    ShowInfoPopup(localDecision.PopupTitle, localDecision.PopupBody);
+                else
+                    MainFile.Logger.Warn($"Skipped building multiplayer execute message: {localDecision.StatusText}");
+                return null;
+            }
+
             return actionKind switch
             {
                 RaiseHandActionKind.Restart => BuildRestartExecuteMessage(),
                 RaiseHandActionKind.SoftRestart => BuildSoftRestartExecuteMessage(actionKind),
+                RaiseHandActionKind.PreviousStep => BuildPreviousStepExecuteMessage(),
                 RaiseHandActionKind.PreviousFloor => BuildPreviousFloorExecuteMessage(),
                 _ => null
             };
         }
         catch (Exception e)
         {
-            MainFile.Logger.Error($"Failed to build execute message for {actionKind}: {e}");
+            MainFile.Logger.Error(
+                $"Failed to build execute message for {RaiseHandActionService.GetActionLabel(actionKind)}: {e}");
             return null;
         }
     }
@@ -379,14 +460,43 @@ public static class MultiplayerApprovalService
         };
     }
 
-    private static RaiseHandExecuteMessage? BuildSoftRestartExecuteMessage(RaiseHandActionKind actionKind)
+    private static RaiseHandExecuteMessage? BuildSoftRestartExecuteMessage(RaiseHandActionKind actionKind, string? restoreHintOverride = null)
     {
         var runState = RunManager.Instance.DebugOnlyGetState();
         if (runState == null)
             return null;
 
+        if (MultiplayerRunStartStageService.IsAtNeowStage(runState))
+        {
+            MainFile.Logger.Info("Routing multiplayer soft restart through the Neow run-start restore payload.");
+            return BuildNeowRunStartExecuteMessage(actionKind, runState);
+        }
+
+        if (runState.CurrentRoom?.RoomType == RoomType.Shop)
+        {
+            var shopSnapshot = MultiplayerSoftRestartSnapshotService.TryReadShopPreEntrySnapshotForCurrentShop(runState);
+            if (shopSnapshot != null && !string.IsNullOrWhiteSpace(shopSnapshot.RunJson))
+            {
+                MainFile.Logger.Info("Using multiplayer shop pre-entry snapshot as the primary payload for shop soft restart.");
+                return new RaiseHandExecuteMessage
+                {
+                    ActionKind = actionKind,
+                    RunJson = shopSnapshot.RunJson,
+                    RoomJson = string.Empty,
+                    SourceRoomType = string.IsNullOrWhiteSpace(shopSnapshot.SourceRoomType)
+                        ? runState.CurrentRoom.RoomType.ToString()
+                        : shopSnapshot.SourceRoomType,
+                    CombatStateJson = string.Empty,
+                    RestoreHint = restoreHintOverride ?? "shop_pre_entry_snapshot"
+                };
+            }
+
+            MainFile.Logger.Warn("Multiplayer shop pre-entry snapshot was unavailable for the current shop room; falling back to the generic multiplayer soft restart payload selection.");
+        }
+
         var shouldIncludeInitialPileSnapshot = MultiplayerSoftRestartRoomClassifier.ShouldUseInitialCombatPileSnapshot(runState);
-        var shouldPreferRoomEntrySnapshot = shouldIncludeInitialPileSnapshot;
+        var shouldPreferRoomEntrySnapshot = shouldIncludeInitialPileSnapshot
+                                            || MultiplayerSoftRestartRoomClassifier.IsEventScopedRoom(runState);
         var localPlayerId = LocalContext.GetMe(runState)?.NetId ?? LocalContext.NetId ?? 0UL;
         var readResult = localPlayerId != 0UL
             ? SaveManager.Instance.LoadAndCanonicalizeMultiplayerRunSave(localPlayerId)
@@ -418,7 +528,7 @@ public static class MultiplayerApprovalService
                     ? runState.CurrentRoom?.RoomType.ToString() ?? string.Empty
                     : multiplayerSnapshot.SourceRoomType,
                 CombatStateJson = initialPileSnapshotJson ?? string.Empty,
-                RestoreHint = "room_entry_snapshot"
+                RestoreHint = restoreHintOverride ?? "room_entry_snapshot"
             };
         }
 
@@ -432,7 +542,7 @@ public static class MultiplayerApprovalService
                 RoomJson = string.Empty,
                 SourceRoomType = runState.CurrentRoom?.RoomType.ToString() ?? string.Empty,
                 CombatStateJson = initialPileSnapshotJson ?? string.Empty,
-                RestoreHint = "current_run_mp_save"
+                RestoreHint = restoreHintOverride ?? "current_run_mp_save"
             };
         }
 
@@ -448,7 +558,7 @@ public static class MultiplayerApprovalService
                     ? runState.CurrentRoom?.RoomType.ToString() ?? string.Empty
                     : multiplayerSnapshot.SourceRoomType,
                 CombatStateJson = initialPileSnapshotJson ?? string.Empty,
-                RestoreHint = "room_entry_snapshot_fallback"
+                RestoreHint = restoreHintOverride ?? "room_entry_snapshot_fallback"
             };
         }
 
@@ -461,12 +571,20 @@ public static class MultiplayerApprovalService
             RoomJson = string.Empty,
             SourceRoomType = runState.CurrentRoom?.RoomType.ToString() ?? string.Empty,
             CombatStateJson = initialPileSnapshotJson ?? string.Empty,
-            RestoreHint = string.Empty
+            RestoreHint = restoreHintOverride ?? string.Empty
         };
     }
 
     private static RaiseHandExecuteMessage? BuildPreviousFloorExecuteMessage()
     {
+        var runState = RunManager.Instance.DebugOnlyGetState();
+        if (runState != null
+            && (MultiplayerRunStartStageService.IsAtNeowStage(runState) || runState.TotalFloor <= 1))
+        {
+            ShowInfoPopup(RaiseHandPopupText.NoWayBackTitleText, RaiseHandPopupText.NoWayBackBodyText);
+            return null;
+        }
+
         if (!MultiplayerPreviousFloorSnapshotService.HasSnapshot())
         {
             ShowInfoPopup(RaiseHandPopupText.NoWayBackTitleText, RaiseHandPopupText.NoWayBackBodyText);
@@ -484,6 +602,62 @@ public static class MultiplayerApprovalService
         };
     }
 
+    private static RaiseHandExecuteMessage? BuildPreviousStepExecuteMessage()
+    {
+        var runState = RunManager.Instance.DebugOnlyGetState();
+        var decision = MultiplayerPreviousStepDecisionService.Evaluate(runState);
+        if (!decision.CanProceed)
+        {
+            if (decision.ShouldShowPopup)
+                ShowInfoPopup(decision.PopupTitle, decision.PopupBody);
+            else
+                MainFile.Logger.Warn($"Skipped building multiplayer previous-step execute message: {decision.StatusText}");
+            return null;
+        }
+
+        var combatRoom = runState?.CurrentRoom as CombatRoom;
+        if (combatRoom != null)
+        {
+            if (decision.Mode == MultiplayerPreviousStepDecisionService.RestoreMode.RoomStart)
+                MultiplayerBossElitePreviousStepService.LogRoomStartRestoreRequested(decision.RoomKind, combatRoom, decision.CurrentRound);
+            else
+                MultiplayerBossElitePreviousStepService.LogRestoreRequested(decision.RoomKind, combatRoom, decision.CurrentRound, decision.TargetRound);
+        }
+
+        if (decision.Mode == MultiplayerPreviousStepDecisionService.RestoreMode.RoomStart)
+        {
+            MainFile.Logger.Info(
+                $"Using multiplayer room-start restore as the previous-step payload. roomKind={decision.RoomKind} currentRound={decision.CurrentRound}.");
+            return BuildSoftRestartExecuteMessage(RaiseHandActionKind.PreviousStep, decision.RestoreHint);
+        }
+
+        var snapshot = MultiplayerPreviousStepSnapshotService.RestoreSnapshotForRound(decision.TargetRound);
+        MainFile.Logger.Info(
+            $"Using multiplayer previous-step snapshot for round {decision.TargetRound}. roomKind={decision.RoomKind} restoreHint={decision.RestoreHint}.");
+        return new RaiseHandExecuteMessage
+        {
+            ActionKind = RaiseHandActionKind.PreviousStep,
+            RunJson = SaveManager.ToJson(snapshot.RunSnapshot),
+            RoomJson = JsonSerializer.Serialize(snapshot.RoomSnapshot),
+            SourceRoomType = snapshot.RoomSnapshot.RoomType.ToString(),
+            CombatStateJson = snapshot.CombatStateJson,
+            RestoreHint = decision.RestoreHint
+        };
+    }
+
+    private static RaiseHandExecuteMessage BuildNeowRunStartExecuteMessage(RaiseHandActionKind actionKind, RunState runState)
+    {
+        return new RaiseHandExecuteMessage
+        {
+            ActionKind = actionKind,
+            RunJson = SaveManager.ToJson(RunManager.Instance.ToSave(null)),
+            RoomJson = string.Empty,
+            SourceRoomType = runState.CurrentRoom?.RoomType.ToString() ?? string.Empty,
+            CombatStateJson = string.Empty,
+            RestoreHint = MultiplayerRunStartStageService.NeowRunStartRestoreHint
+        };
+    }
+
     private static void ShowInfoPopup(string titleText, string bodyText)
     {
         if (NModalContainer.Instance == null)
@@ -498,18 +672,6 @@ public static class MultiplayerApprovalService
 
         NModalContainer.Instance.Add(popup, true);
         Callable.From(() => ConfigureInfoPopup(popup, titleText, bodyText)).CallDeferred();
-    }
-
-    private static string GetActionDisplayText(RaiseHandActionKind actionKind)
-    {
-        return actionKind switch
-        {
-            RaiseHandActionKind.Restart => "\u91cd\u5f00",
-            RaiseHandActionKind.SoftRestart => "\u5c40\u90e8\u91cd\u5f00",
-            RaiseHandActionKind.PreviousStep => "\u56de\u9000\u5230\u4e0a\u4e00\u6b65",
-            RaiseHandActionKind.PreviousFloor => "\u56de\u9000\u5230\u4e0a\u4e00\u5c42",
-            _ => "\u8fdb\u884c\u56de\u9000"
-        };
     }
 
     private static string GetPlayerLabel(ulong netId)
@@ -559,18 +721,25 @@ public static class MultiplayerApprovalService
 
     private sealed class PendingApproval
     {
-        public PendingApproval(string requestId, RaiseHandActionKind actionKind, string initiatorLabel, List<ulong> expectedResponderIds)
+        public PendingApproval(
+            string requestId,
+            RaiseHandActionKind actionKind,
+            string initiatorLabel,
+            List<ulong> expectedResponderIds,
+            ApprovalRequestState requestState)
         {
             RequestId = requestId;
             ActionKind = actionKind;
             InitiatorLabel = initiatorLabel;
             ExpectedResponderIds = expectedResponderIds;
+            RequestState = requestState;
         }
 
         public string RequestId { get; }
         public RaiseHandActionKind ActionKind { get; }
         public string InitiatorLabel { get; }
         public List<ulong> ExpectedResponderIds { get; }
+        public ApprovalRequestState RequestState { get; }
         public Dictionary<ulong, bool> Responses { get; } = [];
     }
 
@@ -588,5 +757,57 @@ public static class MultiplayerApprovalService
         public ulong InitiatorId { get; }
         public RaiseHandActionKind ActionKind { get; }
         public string InitiatorLabel { get; }
+    }
+
+    private sealed class ApprovalRequestState
+    {
+        private ApprovalRequestState(string scopeKey, int totalFloor, int currentRoomCount, int? roundNumber)
+        {
+            ScopeKey = scopeKey;
+            TotalFloor = totalFloor;
+            CurrentRoomCount = currentRoomCount;
+            RoundNumber = roundNumber;
+        }
+
+        public string ScopeKey { get; }
+        public int TotalFloor { get; }
+        public int CurrentRoomCount { get; }
+        public int? RoundNumber { get; }
+
+        public static ApprovalRequestState Capture(RaiseHandActionKind actionKind, RunState? runState)
+        {
+            var roundNumber = actionKind == RaiseHandActionKind.PreviousStep
+                ? (runState?.CurrentRoom as CombatRoom)?.CombatState.RoundNumber
+                : null;
+            return new ApprovalRequestState(
+                BuildApprovalScopeKey(runState),
+                runState?.TotalFloor ?? -1,
+                runState?.CurrentRoomCount ?? -1,
+                roundNumber);
+        }
+
+        public bool MatchesCurrent(RaiseHandActionKind actionKind, RunState? runState)
+        {
+            var current = Capture(actionKind, runState);
+            return string.Equals(ScopeKey, current.ScopeKey, StringComparison.Ordinal)
+                   && TotalFloor == current.TotalFloor
+                   && CurrentRoomCount == current.CurrentRoomCount
+                   && RoundNumber == current.RoundNumber;
+        }
+    }
+
+    private static string BuildApprovalScopeKey(RunState? runState)
+    {
+        if (runState == null)
+            return string.Empty;
+
+        var currentRoom = runState.CurrentRoom;
+        var roomIdentity = currentRoom?.ModelId?.ToString() ?? currentRoom?.RoomType.ToString() ?? "none";
+        var currentCoord = runState.CurrentMapCoord?.ToString() ?? "none";
+        var pointType = runState.CurrentMapPointHistoryEntry?.MapPointType
+                        ?? runState.CurrentMapPoint?.PointType
+                        ?? MapPointType.Unassigned;
+
+        return $"{runState.TotalFloor:D4}_{runState.CurrentRoomCount:D4}_{pointType}_{currentCoord}_{roomIdentity}";
     }
 }

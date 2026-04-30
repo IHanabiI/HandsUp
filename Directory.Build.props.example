@@ -1,0 +1,9 @@
+<Project>
+    <PropertyGroup>
+        <!-- 本地 Godot / MegaDot 4.5.1 Mono 路径 -->
+        <GodotPath>C:/Path/To/Godot_v4.5.1-stable_mono_win64.exe</GodotPath>
+
+        <!-- 如果自动识别不到游戏目录，可手动填写 -->
+        <!-- <Sts2Path>E:/SteamLibrary/steamapps/common/Slay the Spire 2</Sts2Path> -->
+    </PropertyGroup>
+</Project>

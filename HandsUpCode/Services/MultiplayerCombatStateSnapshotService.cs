@@ -11,8 +11,12 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Orbs;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.UI;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes.Cards;
+using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
@@ -20,10 +24,14 @@ using MegaCrit.Sts2.Core.Saves.Runs;
 
 namespace HandsUp.HandsUpCode.Services;
 
-public static class CombatStateSnapshotService
+public static partial class MultiplayerCombatStateSnapshotService
 {
     private static readonly MethodInfo? CombatStateAddCardMethod = typeof(CombatState)
         .GetMethod("AddCard", BindingFlags.Instance | BindingFlags.NonPublic, [typeof(CardModel)]);
+    private static readonly MethodInfo? HandOnCombatStateChangedMethod = typeof(NPlayerHand)
+        .GetMethod("OnCombatStateChanged", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? EndTurnButtonOnTurnStartedMethod = typeof(NEndTurnButton)
+        .GetMethod("OnTurnStarted", BindingFlags.Instance | BindingFlags.NonPublic);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -35,8 +43,7 @@ public static class CombatStateSnapshotService
         if (runState?.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
             return null;
 
-        var netState = NetFullCombatState.FromRun(runState, null);
-        var snapshot = CombatStateSnapshot.FromNetState(netState);
+        var snapshot = CombatStateSnapshot.FromCurrentRun(runState);
         return JsonSerializer.Serialize(snapshot, JsonOptions);
     }
 
@@ -49,15 +56,15 @@ public static class CombatStateSnapshotService
         if (snapshot == null)
             return false;
 
-        await WaitForCombatReadyAsync(runState, restoreContext);
-
-        var combatRoom = runState.CurrentRoom as CombatRoom;
-        var combatState = combatRoom?.CombatState;
-        if (combatState == null || !CombatManager.Instance.IsInProgress)
+        var readyContext = await WaitForCombatReadyAsync(runState, restoreContext);
+        if (readyContext == null)
         {
-            MainFile.Logger.Warn($"Skipped applying combat snapshot for {restoreContext} because no active combat state is available.");
+            MainFile.Logger.Warn($"Skipped applying multiplayer combat snapshot for {restoreContext} because combat was not ready.");
             return false;
         }
+
+        var combatState = readyContext.Value.CombatState;
+        var combatRoom = readyContext.Value.CombatRoom;
 
         runState.Rng.LoadFromSerializable(snapshot.Rng);
         RunManager.Instance.PlayerChoiceSynchronizer.FastForwardChoiceIds(snapshot.NextChoiceIds);
@@ -71,17 +78,41 @@ public static class CombatStateSnapshotService
         combatState.RoundNumber = snapshot.RoundNumber;
         combatState.CurrentSide = snapshot.CurrentSide;
 
-        RestoreCreatureStates(combatState, snapshot.Creatures);
+        await EnsureSnapshotCreaturesExistAsync(combatState, snapshot, restoreContext);
+        var resolutionContext = BuildSnapshotResolutionContext(combatState, snapshot.Creatures);
+        RestoreCreatureStates(combatState, snapshot.Creatures, restoreContext, resolutionContext);
+        RemoveCreaturesMissingFromSnapshot(combatState, snapshot, restoreContext, resolutionContext);
         RestorePlayerStates(runState, snapshot.Players);
+        await RestoreCreatureExtrasAsync(combatState, snapshot.Creatures, restoreContext, resolutionContext);
+        RestorePowerExtras(runState, combatState, snapshot.Creatures, restoreContext, resolutionContext);
         CombatManager.Instance.StateTracker.SetState(combatState);
+        RestoreCombatManagerState(snapshot.CombatManager, restoreContext);
+        await ReconcileCombatRoomCreatureNodes(combatState, snapshot.Creatures, restoreContext, resolutionContext);
+        TryRefreshLocalCombatUi(runState, combatState, snapshot.RoundNumber, restoreContext);
+        await TryRefreshLocalCombatUiAfterDelayAsync(runState, combatRoom, combatState, snapshot.RoundNumber, restoreContext);
+        await SynchronizePostRestoreSpecialPowerStateAsync(combatState, snapshot.Creatures, restoreContext, resolutionContext);
+        RestoreHiddenLiveAllyVisuals(combatState, restoreContext);
 
         foreach (var player in combatState.Players)
-        {
             player.PlayerCombatState?.RecalculateCardValues();
-        }
 
-        MainFile.Logger.Info($"Applied full combat snapshot for {restoreContext}.");
+        MainFile.Logger.Info($"Applied multiplayer combat snapshot for {restoreContext}.");
         return true;
+    }
+
+    public static async Task TryRefreshCurrentEnemyIntentDisplaysAsync(RunState? runState, string restoreContext)
+    {
+        if (runState?.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
+            return;
+
+        try
+        {
+            await RefreshEnemyIntentDisplaysAsync(combatRoom.CombatState);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to refresh multiplayer enemy intents for {restoreContext}: {e.Message}");
+        }
     }
 
     private static CombatStateSnapshot? DeserializeSnapshot(string? combatStateJson, string restoreContext)
@@ -95,48 +126,27 @@ public static class CombatStateSnapshotService
         }
         catch (Exception e)
         {
-            MainFile.Logger.Warn($"Failed to parse combat snapshot for {restoreContext}: {e.Message}");
+            MainFile.Logger.Warn($"Failed to parse multiplayer combat snapshot for {restoreContext}: {e.Message}");
             return null;
         }
     }
 
-    private static async Task WaitForCombatReadyAsync(RunState runState, string restoreContext)
+    private static async Task<ReadyMultiplayerCombatRestoreContext?> WaitForCombatReadyAsync(RunState runState, string restoreContext)
     {
-        if (runState.CurrentRoom is not CombatRoom)
-            return;
-
-        TaskCompletionSource<bool>? turnStartedCompletion = null;
-        void OnTurnStarted(CombatState state)
+        var startedAt = Time.GetTicksMsec();
+        while (Time.GetTicksMsec() - startedAt < CombatReadyTimeoutMs)
         {
-            if (state.CurrentSide == CombatSide.Player)
+            if (TryGetReadyRestoreContext(runState, out var readyContext))
             {
-                turnStartedCompletion?.TrySetResult(true);
+                MainFile.Logger.Info($"Multiplayer combat restore became UI-ready after {Time.GetTicksMsec() - startedAt} ms for {restoreContext}.");
+                return readyContext;
             }
+
+            await Task.Delay(CombatReadyPollIntervalMs);
         }
 
-        if (CombatManager.Instance.IsInProgress
-            && RunManager.Instance.ActionQueueSynchronizer.CombatState == ActionSynchronizerCombatState.PlayPhase
-            && !RunManager.Instance.ActionExecutor.IsPaused)
-        {
-            return;
-        }
-
-        try
-        {
-            turnStartedCompletion = new TaskCompletionSource<bool>();
-            CombatManager.Instance.TurnStarted += OnTurnStarted;
-
-            var timeoutTask = Task.Delay(5000);
-            var completedTask = await Task.WhenAny(turnStartedCompletion.Task, timeoutTask);
-            if (completedTask == timeoutTask)
-            {
-                MainFile.Logger.Warn($"Timed out while waiting for combat play phase before applying snapshot for {restoreContext}.");
-            }
-        }
-        finally
-        {
-            CombatManager.Instance.TurnStarted -= OnTurnStarted;
-        }
+        MainFile.Logger.Warn($"Timed out while waiting for multiplayer combat UI readiness before applying snapshot for {restoreContext}.");
+        return null;
     }
 
     private static void RestoreCreatureStates(CombatState combatState, IReadOnlyList<CombatCreatureSnapshot> snapshots)
@@ -166,7 +176,7 @@ public static class CombatStateSnapshotService
 
             if (creature == null)
             {
-                MainFile.Logger.Warn($"Skipped combat creature snapshot restore because the target creature could not be resolved. Monster={snapshot.MonsterId}, Player={snapshot.PlayerId}");
+                MainFile.Logger.Warn($"Skipped multiplayer combat creature snapshot restore because the target creature could not be resolved. Monster={snapshot.MonsterId}, Player={snapshot.PlayerId}");
                 continue;
             }
 
@@ -198,7 +208,7 @@ public static class CombatStateSnapshotService
             var player = runState.GetPlayer(snapshot.PlayerId);
             if (player == null)
             {
-                MainFile.Logger.Warn($"Skipped combat player snapshot restore because player {snapshot.PlayerId} was not found.");
+                MainFile.Logger.Warn($"Skipped multiplayer combat player snapshot restore because player {snapshot.PlayerId} was not found.");
                 continue;
             }
 
@@ -221,10 +231,9 @@ public static class CombatStateSnapshotService
     private static void RestorePlayerPiles(RunState runState, Player player, IReadOnlyList<CombatPileSnapshot> pileSnapshots)
     {
         var combat = player.PlayerCombatState!;
+        var usedDeckCards = new HashSet<CardModel>();
         foreach (var existingCard in combat.AllPiles.SelectMany(pile => pile.Cards).ToList())
-        {
             existingCard.RemoveFromState();
-        }
 
         foreach (var pileSnapshot in pileSnapshots)
         {
@@ -234,24 +243,15 @@ public static class CombatStateSnapshotService
 
             foreach (var cardSnapshot in pileSnapshot.Cards)
             {
-                var card = runState.LoadCard(cardSnapshot.Card, player);
+                var deckVersion = ResolveDeckVersion(runState, player, cardSnapshot, usedDeckCards);
+                var loadableCard = MultiplayerSerializableCardStateService.ResolveCardForRestore(
+                    cardSnapshot.Card,
+                    player,
+                    deckVersion?.ToSerializable() ?? cardSnapshot.DeckVersionCard);
+                var card = runState.LoadCard(loadableCard, player);
                 RegisterCardInCombatState(card);
-                card.DeckVersion = null;
-
-                if (cardSnapshot.Affliction != null)
-                {
-                    var affliction = ModelDb.GetById<AfflictionModel>(cardSnapshot.Affliction).ToMutable();
-                    card.AfflictInternal(affliction, cardSnapshot.AfflictionCount);
-                }
-
-                if (cardSnapshot.Keywords != null)
-                {
-                    foreach (var keyword in cardSnapshot.Keywords)
-                    {
-                        if (!card.Keywords.Contains(keyword))
-                            card.AddKeyword(keyword);
-                    }
-                }
+                card.DeckVersion = deckVersion;
+                ApplyCardSnapshotState(card, cardSnapshot);
 
                 targetPile.AddInternal(card, -1, false);
             }
@@ -278,7 +278,72 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatStateSnapshot
+    private static void TryRefreshLocalCombatUi(RunState runState, CombatState combatState, string restoreContext)
+    {
+        TryRefreshLocalCombatUi(runState, combatState, combatState.RoundNumber, restoreContext);
+    }
+
+    private static void TryRefreshLocalCombatUi(RunState runState, CombatState combatState, int roundNumber, string restoreContext)
+    {
+        try
+        {
+            RebuildLocalHandUi(runState);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to rebuild local multiplayer hand UI for {restoreContext}: {e.Message}");
+        }
+
+        try
+        {
+            var handUi = NPlayerHand.Instance;
+            if (handUi != null)
+                HandOnCombatStateChangedMethod?.Invoke(handUi, [combatState]);
+
+            var endTurnButton = NCombatRoom.Instance?.Ui?.EndTurnButton;
+            if (endTurnButton != null && combatState.CurrentSide == CombatSide.Player)
+                EndTurnButtonOnTurnStartedMethod?.Invoke(endTurnButton, [combatState]);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to refresh local multiplayer combat UI for {restoreContext}: {e.Message}");
+        }
+    }
+
+    private static void RebuildLocalHandUi(RunState runState)
+    {
+        var handUi = NPlayerHand.Instance;
+        var localPlayer = MegaCrit.Sts2.Core.Context.LocalContext.GetMe(runState);
+        if (handUi == null || localPlayer?.PlayerCombatState == null)
+            return;
+
+        handUi.CancelAllCardPlay();
+
+        foreach (var holder in handUi.ActiveHolders.ToList())
+        {
+            var cardModel = holder.CardModel;
+            if (cardModel != null)
+                handUi.Remove(cardModel);
+        }
+
+        var handPile = CardPile.Get(PileType.Hand, localPlayer);
+        if (handPile == null)
+            return;
+
+        for (var index = 0; index < handPile.Cards.Count; index++)
+        {
+            var card = handPile.Cards[index];
+            var cardNode = NCard.Create(card, ModelVisibility.Visible);
+            if (cardNode == null)
+                continue;
+
+            handUi.Add(cardNode, index);
+        }
+
+        handUi.ForceRefreshCardIndices();
+    }
+
+    public sealed partial class CombatStateSnapshot
     {
         public List<CombatCreatureSnapshot> Creatures { get; set; } = [];
         public List<CombatPlayerSnapshot> Players { get; set; } = [];
@@ -306,7 +371,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatCreatureSnapshot
+    public sealed partial class CombatCreatureSnapshot
     {
         public ModelId? MonsterId { get; set; }
         public ulong? PlayerId { get; set; }
@@ -329,7 +394,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatPowerSnapshot
+    public sealed partial class CombatPowerSnapshot
     {
         public ModelId Id { get; set; }
         public int Amount { get; set; }
@@ -344,7 +409,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatPlayerSnapshot
+    public sealed partial class CombatPlayerSnapshot
     {
         public ulong PlayerId { get; set; }
         public ModelId CharacterId { get; set; }
@@ -389,7 +454,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatPileSnapshot
+    public sealed partial class CombatPileSnapshot
     {
         public PileType PileType { get; set; }
         public List<CombatCardSnapshot> Cards { get; set; } = [];
@@ -404,7 +469,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatCardSnapshot
+    public sealed partial class CombatCardSnapshot
     {
         public SerializableCard Card { get; set; } = new();
         public ModelId? Affliction { get; set; }
@@ -423,7 +488,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatPotionSnapshot
+    public sealed partial class CombatPotionSnapshot
     {
         public ModelId Id { get; set; }
 
@@ -436,7 +501,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatRelicSnapshot
+    public sealed partial class CombatRelicSnapshot
     {
         public SerializableRelic Relic { get; set; } = new();
 
@@ -449,7 +514,7 @@ public static class CombatStateSnapshotService
         }
     }
 
-    public sealed class CombatOrbSnapshot
+    public sealed partial class CombatOrbSnapshot
     {
         public ModelId Id { get; set; }
         public int Passive { get; set; }

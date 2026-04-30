@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using Godot;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
@@ -13,9 +14,9 @@ using MegaCrit.Sts2.Core.Saves.Runs;
 
 namespace HandsUp.HandsUpCode.Services;
 
-public static class PreviousStepSnapshotService
+public static class MultiplayerPreviousStepSnapshotService
 {
-    private const string SnapshotDirectoryName = "handsup_previous_step_history";
+    private const string SnapshotDirectoryName = "handsup_multiplayer_previous_step_history";
     private const string SnapshotFileExtension = ".json";
     private static string? _suppressedNextCaptureKey;
 
@@ -24,11 +25,11 @@ public static class PreviousStepSnapshotService
         WriteIndented = false
     };
 
-    private static string GetSnapshotDirectoryPath()
+    private static string GetSnapshotDirectoryPath(string runKey)
     {
         return UserDataPathProvider.GetProfileScopedPath(
             SaveManager.Instance.CurrentProfileId,
-            Path.Combine(UserDataPathProvider.SavesDir, SnapshotDirectoryName));
+            Path.Combine(UserDataPathProvider.SavesDir, SnapshotDirectoryName, runKey));
     }
 
     public static void CaptureSnapshotFromCurrentCombatStep(RunManager? runManager, string sourceTag)
@@ -38,7 +39,7 @@ public static class PreviousStepSnapshotService
             var payload = BuildSnapshotPayload(runManager);
             if (payload == null)
             {
-                MainFile.Logger.Info($"Skipped previous-step snapshot capture from {sourceTag} because snapshot payload was unavailable.");
+                MainFile.Logger.Info($"Skipped multiplayer previous-step snapshot capture from {sourceTag} because snapshot payload was unavailable.");
                 return;
             }
 
@@ -47,41 +48,48 @@ public static class PreviousStepSnapshotService
         }
         catch (Exception e)
         {
-            MainFile.Logger.Error($"Failed to capture previous-step snapshot from {sourceTag}: {e}");
+            MainFile.Logger.Error($"Failed to capture multiplayer previous-step snapshot from {sourceTag}: {e}");
         }
     }
 
     public static void ClearSnapshots(string reason)
     {
-        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath());
-        if (!Directory.Exists(snapshotDirectory))
+        var snapshotRootDirectory = ProjectSettings.GlobalizePath(UserDataPathProvider.GetProfileScopedPath(
+            SaveManager.Instance.CurrentProfileId,
+            Path.Combine(UserDataPathProvider.SavesDir, SnapshotDirectoryName)));
+        if (!Directory.Exists(snapshotRootDirectory))
             return;
 
-        foreach (var snapshotFile in Directory.GetFiles(snapshotDirectory, $"step_*{SnapshotFileExtension}", SearchOption.TopDirectoryOnly))
+        foreach (var snapshotFile in Directory.GetFiles(snapshotRootDirectory, $"step_*{SnapshotFileExtension}", SearchOption.AllDirectories))
             File.Delete(snapshotFile);
 
         _suppressedNextCaptureKey = null;
-        MainFile.Logger.Info($"Cleared previous-step snapshots: {reason}");
+        MainFile.Logger.Info($"Cleared multiplayer previous-step snapshots: {reason}");
     }
 
     public static bool HasSnapshot()
     {
-        return GetSnapshotFiles().Count > 0;
+        return MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey)
+               && GetSnapshotFiles(runKey).Count > 0;
     }
 
     public static bool HasSnapshotForRound(int roundNumber)
     {
-        return TryGetSnapshotFileForRound(roundNumber) != null;
+        return MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey)
+               && TryGetSnapshotFileForRound(runKey, roundNumber) != null;
     }
 
     public static RestoredStepSnapshot RestoreSnapshotForRound(int roundNumber)
     {
-        var snapshotFile = TryGetSnapshotFileForRound(roundNumber)
-                           ?? throw new FileNotFoundException($"Previous step snapshot for round {roundNumber} was not found.");
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey))
+            throw new FileNotFoundException("Multiplayer previous step snapshot scope was not found.");
+
+        var snapshotFile = TryGetSnapshotFileForRound(runKey, roundNumber)
+                           ?? throw new FileNotFoundException($"Multiplayer previous step snapshot for round {roundNumber} was not found.");
         var snapshot = ReadSnapshot(snapshotFile.FullName);
 
         _suppressedNextCaptureKey = snapshot.StepKey;
-        MainFile.Logger.Info($"Previous-step snapshot for round {roundNumber} restored from {snapshotFile.FullName} without deleting the snapshot node.");
+        MainFile.Logger.Info($"Multiplayer previous-step snapshot for round {roundNumber} restored from {snapshotFile.FullName} without deleting the snapshot node.");
         return snapshot;
     }
 
@@ -89,12 +97,18 @@ public static class PreviousStepSnapshotService
     {
         if (_suppressedNextCaptureKey == payload.StepKey)
         {
-            MainFile.Logger.Info($"Skipped previous-step snapshot capture for {payload.StepKey} after restore.");
+            MainFile.Logger.Info($"Skipped multiplayer previous-step snapshot capture for {payload.StepKey} after restore.");
             _suppressedNextCaptureKey = null;
             return;
         }
 
-        var existingSnapshotForSameStep = GetSnapshotFiles()
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey))
+        {
+            MainFile.Logger.Warn($"Skipped multiplayer previous-step snapshot write for {payload.StepKey} because the current run key was unavailable.");
+            return;
+        }
+
+        var existingSnapshotForSameStep = GetSnapshotFiles(runKey)
             .Where(snapshotFile => ReadStepKey(snapshotFile.FullName) == payload.StepKey)
             .ToList();
 
@@ -102,28 +116,36 @@ public static class PreviousStepSnapshotService
             File.Delete(snapshotFile.FullName);
 
         if (existingSnapshotForSameStep.Count > 0)
-            MainFile.Logger.Info($"Overwriting previous-step snapshot node for {payload.StepKey}.");
+            MainFile.Logger.Info($"Overwriting multiplayer previous-step snapshot node for {payload.StepKey}.");
 
-        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath());
+        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath(runKey));
         Directory.CreateDirectory(snapshotDirectory);
 
         var snapshotPath = Path.Combine(snapshotDirectory, GetSnapshotFileName(payload));
         var snapshotJson = JsonSerializer.Serialize(payload, JsonOptions);
         File.WriteAllText(snapshotPath, snapshotJson, Encoding.UTF8);
 
-        MainFile.Logger.Info($"Previous-step snapshot written from {sourceTag} to {snapshotPath}");
+        MainFile.Logger.Info($"Multiplayer previous-step snapshot written from {sourceTag} to {snapshotPath}");
     }
 
     private static StepSnapshotPayload? BuildSnapshotPayload(RunManager? runManager)
     {
         var runState = runManager?.DebugOnlyGetState();
-        if (runState == null || !runManager!.IsSinglePlayerOrFakeMultiplayer)
+        var netType = runManager?.NetService?.Type;
+        if (runState == null
+            || runManager == null
+            || (netType != NetGameType.Host && netType != NetGameType.Client))
+        {
+            return null;
+        }
+
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(runManager, out _))
             return null;
 
         if (runState.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
             return null;
 
-        var roomSnapshot = SingleplayerEventCombatPreviousStepService.CreateRoomSnapshot(runState.CurrentRoom);
+        var roomSnapshot = MultiplayerEventCombatPreviousStepService.CreateRoomSnapshot(runState.CurrentRoom);
         var runSnapshot = runManager.ToSave(null);
         var stepKey = BuildStepKey(runState, runState.CurrentRoom);
         var roomScopeKey = BuildRoomScopeKey(runState, runState.CurrentRoom);
@@ -138,13 +160,16 @@ public static class PreviousStepSnapshotService
             RoomType = runState.CurrentRoom.RoomType.ToString(),
             RunJson = SaveManager.ToJson(runSnapshot),
             RoomJson = JsonSerializer.Serialize(roomSnapshot, JsonOptions),
-            CombatStateJson = SingleplayerCombatStateSnapshotService.CaptureCurrentCombatStateJson(runState) ?? string.Empty
+            CombatStateJson = MultiplayerCombatStateSnapshotService.CaptureCurrentCombatStateJson(runState) ?? string.Empty
         };
     }
 
     private static void ClearSnapshotsIfScopeChanged(string roomScopeKey)
     {
-        var latestSnapshot = GetSnapshotFiles().LastOrDefault();
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey))
+            return;
+
+        var latestSnapshot = GetSnapshotFiles(runKey).LastOrDefault();
         if (latestSnapshot.FullName == null)
             return;
 
@@ -153,7 +178,7 @@ public static class PreviousStepSnapshotService
         if (payload == null || payload.RoomScopeKey == roomScopeKey)
             return;
 
-        ClearSnapshots($"switching previous-step scope from {payload.RoomScopeKey} to {roomScopeKey}");
+        ClearSnapshots($"switching multiplayer previous-step scope from {payload.RoomScopeKey} to {roomScopeKey}");
     }
 
     private static string BuildStepKey(RunState runState, AbstractRoom currentRoom)
@@ -174,9 +199,9 @@ public static class PreviousStepSnapshotService
         return $"step_{payload.FloorIndex:D4}_{payload.RoundNumber:D4}_{payload.CaptureTicksUtc}{SnapshotFileExtension}";
     }
 
-    private static List<SnapshotFile> GetSnapshotFiles()
+    private static List<SnapshotFile> GetSnapshotFiles(string runKey)
     {
-        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath());
+        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath(runKey));
         if (!Directory.Exists(snapshotDirectory))
             return [];
 
@@ -186,9 +211,9 @@ public static class PreviousStepSnapshotService
             .ToList();
     }
 
-    private static SnapshotFile? TryGetSnapshotFileForRound(int roundNumber)
+    private static SnapshotFile? TryGetSnapshotFileForRound(string runKey, int roundNumber)
     {
-        foreach (var snapshotFile in GetSnapshotFiles().OrderByDescending(file => file.LastWriteTimeUtc))
+        foreach (var snapshotFile in GetSnapshotFiles(runKey).OrderByDescending(file => file.LastWriteTimeUtc))
         {
             var snapshotJson = File.ReadAllText(snapshotFile.FullName, Encoding.UTF8);
             var payload = JsonSerializer.Deserialize<StepSnapshotPayload>(snapshotJson, JsonOptions);
@@ -204,15 +229,15 @@ public static class PreviousStepSnapshotService
         var snapshotJson = File.ReadAllText(snapshotPath, Encoding.UTF8);
         var payload = JsonSerializer.Deserialize<StepSnapshotPayload>(snapshotJson, JsonOptions);
         if (payload == null)
-            throw new InvalidDataException($"Failed to parse previous step snapshot payload: {snapshotPath}");
+            throw new InvalidDataException($"Failed to parse multiplayer previous step snapshot payload: {snapshotPath}");
 
         var runReadResult = SaveManager.FromJson<SerializableRun>(payload.RunJson);
         if (!runReadResult.Success || runReadResult.SaveData == null)
-            throw new InvalidDataException($"Failed to parse previous step run snapshot: {snapshotPath}");
+            throw new InvalidDataException($"Failed to parse multiplayer previous step run snapshot: {snapshotPath}");
 
         var roomSnapshot = JsonSerializer.Deserialize<SerializableRoom>(payload.RoomJson, JsonOptions);
         if (roomSnapshot == null)
-            throw new InvalidDataException($"Failed to parse previous step room snapshot: {snapshotPath}");
+            throw new InvalidDataException($"Failed to parse multiplayer previous step room snapshot: {snapshotPath}");
 
         return new RestoredStepSnapshot(runReadResult.SaveData, roomSnapshot, payload.StepKey, payload.CombatStateJson);
     }

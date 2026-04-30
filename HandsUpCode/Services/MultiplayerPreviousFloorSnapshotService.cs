@@ -17,11 +17,11 @@ public static class MultiplayerPreviousFloorSnapshotService
     private const string SnapshotDirectoryName = "handsup_multiplayer_previous_floor_history";
     private const string SnapshotFileExtension = ".json";
 
-    private static string GetSnapshotDirectoryPath()
+    private static string GetSnapshotDirectoryPath(string runKey)
     {
         return UserDataPathProvider.GetProfileScopedPath(
             SaveManager.Instance.CurrentProfileId,
-            Path.Combine(UserDataPathProvider.SavesDir, SnapshotDirectoryName));
+            Path.Combine(UserDataPathProvider.SavesDir, SnapshotDirectoryName, runKey));
     }
 
     public static void CaptureSnapshotFromCurrentState(RunManager? runManager)
@@ -31,8 +31,11 @@ public static class MultiplayerPreviousFloorSnapshotService
         if (runState == null || (netType != NetGameType.Host && netType != NetGameType.Client))
             return;
 
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(runManager, out var runKey))
+            return;
+
         var floorIndex = runState.TotalFloor;
-        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath());
+        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath(runKey));
         Directory.CreateDirectory(snapshotDirectory);
 
         var snapshot = runManager!.ToSave(null);
@@ -45,16 +48,19 @@ public static class MultiplayerPreviousFloorSnapshotService
 
     public static bool HasSnapshot()
     {
-        return GetSnapshotFiles().Count > 0;
+        return MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey)
+               && GetSnapshotFiles(runKey).Count > 0;
     }
 
     public static void ClearSnapshots(string reason)
     {
-        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath());
-        if (!Directory.Exists(snapshotDirectory))
+        var snapshotRootDirectory = ProjectSettings.GlobalizePath(UserDataPathProvider.GetProfileScopedPath(
+            SaveManager.Instance.CurrentProfileId,
+            Path.Combine(UserDataPathProvider.SavesDir, SnapshotDirectoryName)));
+        if (!Directory.Exists(snapshotRootDirectory))
             return;
 
-        foreach (var snapshotFile in Directory.GetFiles(snapshotDirectory, $"floor_*{SnapshotFileExtension}", SearchOption.TopDirectoryOnly))
+        foreach (var snapshotFile in Directory.GetFiles(snapshotRootDirectory, $"floor_*{SnapshotFileExtension}", SearchOption.AllDirectories))
             File.Delete(snapshotFile);
 
         MainFile.Logger.Info($"Cleared multiplayer previous-floor snapshots: {reason}");
@@ -62,7 +68,10 @@ public static class MultiplayerPreviousFloorSnapshotService
 
     public static SerializableRun RestoreLatestSnapshot()
     {
-        var latestSnapshot = GetLatestSnapshotFile()
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey))
+            throw new FileNotFoundException("Multiplayer previous floor snapshot scope was not found.");
+
+        var latestSnapshot = GetLatestSnapshotFile(runKey)
                              ?? throw new FileNotFoundException("Multiplayer previous floor snapshot was not found.");
         var snapshot = ReadSnapshot(latestSnapshot.FullName);
 
@@ -74,14 +83,20 @@ public static class MultiplayerPreviousFloorSnapshotService
 
     public static SerializableRun PeekLatestSnapshot()
     {
-        var latestSnapshot = GetLatestSnapshotFile()
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey))
+            throw new FileNotFoundException("Multiplayer previous floor snapshot scope was not found.");
+
+        var latestSnapshot = GetLatestSnapshotFile(runKey)
                              ?? throw new FileNotFoundException("Multiplayer previous floor snapshot was not found.");
         return ReadSnapshot(latestSnapshot.FullName);
     }
 
     public static void DiscardLatestSnapshot(string reason)
     {
-        var latestSnapshot = GetLatestSnapshotFile();
+        if (!MultiplayerRunSnapshotIdentity.TryCreateRunKey(RunManager.Instance, out var runKey))
+            return;
+
+        var latestSnapshot = GetLatestSnapshotFile(runKey);
         if (latestSnapshot == null)
             return;
 
@@ -94,9 +109,9 @@ public static class MultiplayerPreviousFloorSnapshotService
         return $"floor_{floorIndex:D4}{SnapshotFileExtension}";
     }
 
-    private static List<SnapshotFile> GetSnapshotFiles()
+    private static List<SnapshotFile> GetSnapshotFiles(string runKey)
     {
-        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath());
+        var snapshotDirectory = ProjectSettings.GlobalizePath(GetSnapshotDirectoryPath(runKey));
         if (!Directory.Exists(snapshotDirectory))
             return [];
 
@@ -107,9 +122,9 @@ public static class MultiplayerPreviousFloorSnapshotService
             .ToList();
     }
 
-    private static SnapshotFile? GetLatestSnapshotFile()
+    private static SnapshotFile? GetLatestSnapshotFile(string runKey)
     {
-        var snapshotFiles = GetSnapshotFiles();
+        var snapshotFiles = GetSnapshotFiles(runKey);
         return snapshotFiles.Count == 0 ? null : snapshotFiles[^1];
     }
 
