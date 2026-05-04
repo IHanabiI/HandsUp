@@ -272,7 +272,7 @@ public static class SingleplayerPreviousStepSnapshotCoordinator
             return false;
         }
 
-        if (!CombatManager.Instance.IsPlayPhase)
+        if (!CombatStateCompatibilityService.IsPlayPhase(combatState))
         {
             failureReason = "combat is not in play phase";
             return false;

@@ -67,11 +67,23 @@ public static partial class MultiplayerCombatStateSnapshotService
     private const string TestSubjectKnockedOutLoop2AnimationId = "knocked_out_loop2";
     private const string TestSubjectDieAnimationId = "die";
     private const int KaiserCrabRightArmTrack = 2;
+    private const string NecrobinderCharacterId = "CHARACTER.NECROBINDER";
+    private const string OstyMonsterId = "OSTY";
+
+    // Multiplayer older previous-step snapshots did not persist pet owner ids.
+    // Keep a narrow fallback map here so pet restores do not regress into enemy-side creatures.
+    private static readonly Dictionary<string, string> KnownPetOwnerCharacterIdsByMonsterId = new(StringComparer.Ordinal)
+    {
+        [OstyMonsterId] = NecrobinderCharacterId
+    };
 
     private static readonly MethodInfo? HandCanPlayCardsMethod = typeof(NPlayerHand)
         .GetMethod("CanPlayCards", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? HandAreCardActionsAllowedMethod = typeof(NPlayerHand)
         .GetMethod("AreCardActionsAllowed", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? MonsterModelNextMoveSetter = typeof(MonsterModel)
+        .GetProperty("NextMove", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?
+        .GetSetMethod(true);
     private static readonly FieldInfo? MoveStateMachineCurrentStateField = typeof(MonsterMoveStateMachine)
         .GetField("_currentState", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? MoveStateMachinePerformedFirstMoveField = typeof(MonsterMoveStateMachine)
@@ -175,8 +187,10 @@ public static partial class MultiplayerCombatStateSnapshotService
 
             try
             {
-                var monster = SaveUtil.MonsterOrDeprecated(creatureSnapshot.MonsterId).ToMutable();
-                var recreatedCreature = await CreatureCmd.Add(monster, combatState, CombatSide.Enemy, creatureSnapshot.SlotName);
+                var recreatedCreature = await RecreateMissingSnapshotCreatureAsync(combatState, creatureSnapshot, restoreContext);
+                if (recreatedCreature == null)
+                    continue;
+
                 resolvedCreatures.Add(recreatedCreature);
                 recreatedCreatures.Add(DescribeSnapshotCreatureForLog(creatureSnapshot));
             }
@@ -197,6 +211,41 @@ public static partial class MultiplayerCombatStateSnapshotService
         MainFile.Logger.Info(
             $"Recreated {recreatedCreatures.Count} creature(s) missing from multiplayer combat snapshot for {restoreContext}: " +
             $"{string.Join(", ", recreatedCreatures)}");
+    }
+
+    private static async Task<Creature?> RecreateMissingSnapshotCreatureAsync(
+        CombatState combatState,
+        CombatCreatureSnapshot creatureSnapshot,
+        string restoreContext)
+    {
+        if (creatureSnapshot.MonsterId == null)
+            return null;
+
+        var monster = SaveUtil.MonsterOrDeprecated(creatureSnapshot.MonsterId).ToMutable();
+        if (TryResolvePetOwnerPlayer(combatState, creatureSnapshot.MonsterId, creatureSnapshot.PetOwnerPlayerId, out var petOwner)
+            && petOwner?.PlayerCombatState != null)
+        {
+            if (!creatureSnapshot.PetOwnerPlayerId.HasValue)
+            {
+                MainFile.Logger.Info(
+                    $"Inferred missing multiplayer pet owner {petOwner.NetId} while recreating snapshot creature " +
+                    $"{DescribeSnapshotCreatureForLog(creatureSnapshot)} for {restoreContext}.");
+            }
+
+            var pet = combatState.CreateCreature(monster, petOwner.Creature.Side, creatureSnapshot.SlotName);
+            petOwner.PlayerCombatState.AddPetInternal(pet);
+            await CreatureCmd.Add(pet);
+            return pet;
+        }
+
+        if (creatureSnapshot.PetOwnerPlayerId.HasValue)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to resolve pet owner {creatureSnapshot.PetOwnerPlayerId.Value} while recreating multiplayer snapshot creature " +
+                $"{DescribeSnapshotCreatureForLog(creatureSnapshot)} for {restoreContext}. Falling back to enemy-side recreation.");
+        }
+
+        return await CreatureCmd.Add(monster, combatState, CombatSide.Enemy, creatureSnapshot.SlotName);
     }
 
     private static void RestoreCreatureStates(
@@ -293,12 +342,12 @@ public static partial class MultiplayerCombatStateSnapshotService
                     continue;
             }
 
+            foreach (var fieldSnapshot in snapshot.SpecialFields)
+                TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId?.Entry ?? "unknown"}");
+
             if (await TryRestoreIllusionReviveMoveStateAsync(creature, snapshot, restoreContext))
             {
-                foreach (var fieldSnapshot in snapshot.SpecialFields)
-                    TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId?.Entry ?? "unknown"}");
-
-                await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext);
+                await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays: false);
                 continue;
             }
 
@@ -306,19 +355,7 @@ public static partial class MultiplayerCombatStateSnapshotService
                 && moveStateMachine.States.TryGetValue(snapshot.CurrentMoveStateId, out var currentState)
                 && currentState is MoveState moveState)
             {
-                ApplyFollowUpStateSnapshot(moveStateMachine, moveState, snapshot, creature);
-                monster.SetMoveImmediate(moveState, true);
-                moveStateMachine.StateLog.Clear();
-                foreach (var stateId in snapshot.MoveStateLogIds)
-                {
-                    if (moveStateMachine.States.TryGetValue(stateId, out var loggedState))
-                        moveStateMachine.StateLog.Add(loggedState);
-                }
-
-                MoveStateMachineCurrentStateField?.SetValue(moveStateMachine, moveState);
-                MoveStateMachinePerformedFirstMoveField?.SetValue(moveStateMachine, snapshot.PerformedFirstMove);
-                if (!snapshot.IsTemporaryStunned)
-                    creature.PrepareForNextTurn(combatState.PlayerCreatures, false);
+                RestoreMonsterMoveStateSilently(monster, moveStateMachine, moveState, snapshot, creature, restoreContext);
             }
             else if (!string.IsNullOrWhiteSpace(snapshot.CurrentMoveStateId))
             {
@@ -327,12 +364,39 @@ public static partial class MultiplayerCombatStateSnapshotService
                     $"because it was not present after restore. Slot={snapshot.SlotName}, TemporaryStunned={snapshot.IsTemporaryStunned}");
             }
 
-            foreach (var fieldSnapshot in snapshot.SpecialFields)
-                TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId?.Entry ?? "unknown"}");
-
             RestoreFabricatorState(monster, snapshot, restoreContext);
-            await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays: false);
         }
+    }
+
+    private static void RestoreMonsterMoveStateSilently(
+        MonsterModel monster,
+        MonsterMoveStateMachine moveStateMachine,
+        MoveState moveState,
+        CombatCreatureSnapshot snapshot,
+        Creature? creature,
+        string restoreContext)
+    {
+        if (MonsterModelNextMoveSetter == null)
+        {
+            MainFile.Logger.Warn(
+                $"Skipped restoring multiplayer move state {snapshot.CurrentMoveStateId ?? "unknown"} for monster " +
+                $"{snapshot.MonsterId?.Entry ?? creature?.Monster?.Id.Entry ?? "unknown"} because NextMove setter could not be reflected during {restoreContext}.");
+            return;
+        }
+
+        ApplyFollowUpStateSnapshot(moveStateMachine, moveState, snapshot, creature);
+        MonsterModelNextMoveSetter.Invoke(monster, [moveState]);
+
+        moveStateMachine.StateLog.Clear();
+        foreach (var stateId in snapshot.MoveStateLogIds)
+        {
+            if (moveStateMachine.States.TryGetValue(stateId, out var loggedState))
+                moveStateMachine.StateLog.Add(loggedState);
+        }
+
+        MoveStateMachineCurrentStateField?.SetValue(moveStateMachine, moveState);
+        MoveStateMachinePerformedFirstMoveField?.SetValue(moveStateMachine, snapshot.PerformedFirstMove);
     }
 
     private static async Task<bool> TryRestoreIllusionReviveMoveStateAsync(Creature? creature, CombatCreatureSnapshot snapshot, string restoreContext)
@@ -422,35 +486,39 @@ public static partial class MultiplayerCombatStateSnapshotService
         }
     }
 
-    private static async Task TrySynchronizeSpecialMonsterStateAsync(Creature? creature, CombatCreatureSnapshot snapshot, string restoreContext)
+    private static async Task TrySynchronizeSpecialMonsterStateAsync(
+        Creature? creature,
+        CombatCreatureSnapshot snapshot,
+        string restoreContext,
+        bool refreshIntentDisplays = true)
     {
         if (creature?.Monster is Rocket)
         {
-            await TrySynchronizeKaiserCrabRocketStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeKaiserCrabRocketStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is TestSubject)
         {
-            await TrySynchronizeTestSubjectVisualStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeTestSubjectVisualStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is Doormaker doormaker)
         {
-            await TrySynchronizeDoormakerVisualStateAsync(creature, doormaker, snapshot, restoreContext);
+            await TrySynchronizeDoormakerVisualStateAsync(creature, doormaker, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is OwlMagistrate)
         {
-            await TrySynchronizeOwlMagistrateVisualStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeOwlMagistrateVisualStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is KnowledgeDemon)
         {
-            await TrySynchronizeKnowledgeDemonVisualStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeKnowledgeDemonVisualStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
@@ -462,7 +530,7 @@ public static partial class MultiplayerCombatStateSnapshotService
 
         if (!toughEgg.IsHatched)
         {
-            if (creatureNode != null)
+            if (refreshIntentDisplays && creatureNode != null)
                 await creatureNode.RefreshIntents();
             return;
         }
@@ -471,7 +539,7 @@ public static partial class MultiplayerCombatStateSnapshotService
         {
             await CreatureCmd.TriggerAnim(creature, "Hatch", 0.5f);
             RepositionToughEggNode(creature, toughEgg, snapshot, creatureNode);
-            if (creatureNode != null)
+            if (refreshIntentDisplays && creatureNode != null)
                 await creatureNode.RefreshIntents();
         }
         catch (Exception e)
@@ -485,7 +553,8 @@ public static partial class MultiplayerCombatStateSnapshotService
     private static async Task TrySynchronizeKnowledgeDemonVisualStateAsync(
         Creature creature,
         CombatCreatureSnapshot snapshot,
-        string restoreContext)
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -503,7 +572,8 @@ public static partial class MultiplayerCombatStateSnapshotService
             ForceCreatureLoopAnimation(creatureNode, targetAnimationId);
             SynchronizeKnowledgeDemonBurningVfx(creatureNode, isBurnt);
 
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
         }
         catch (Exception e)
         {
@@ -551,7 +621,11 @@ public static partial class MultiplayerCombatStateSnapshotService
         return null;
     }
 
-    private static async Task TrySynchronizeKaiserCrabRocketStateAsync(Creature creature, CombatCreatureSnapshot snapshot, string restoreContext)
+    private static async Task TrySynchronizeKaiserCrabRocketStateAsync(
+        Creature creature,
+        CombatCreatureSnapshot snapshot,
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -559,7 +633,7 @@ public static partial class MultiplayerCombatStateSnapshotService
             TrySynchronizeKaiserCrabRocketVisualState(snapshot, restoreContext);
 
             var creatureNode = NCombatRoom.Instance?.GetCreatureNode(creature);
-            if (creatureNode != null)
+            if (refreshIntentDisplays && creatureNode != null)
                 await creatureNode.RefreshIntents();
         }
         catch (Exception e)
@@ -602,7 +676,8 @@ public static partial class MultiplayerCombatStateSnapshotService
         Creature creature,
         Doormaker doormaker,
         CombatCreatureSnapshot snapshot,
-        string restoreContext)
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -624,7 +699,8 @@ public static partial class MultiplayerCombatStateSnapshotService
             }
 
             creatureNode.GetNodeOrNull<Node>("%HealthBar")?.Call("RefreshValues");
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
         }
         catch (Exception e)
         {
@@ -673,7 +749,8 @@ public static partial class MultiplayerCombatStateSnapshotService
     private static async Task TrySynchronizeOwlMagistrateVisualStateAsync(
         Creature creature,
         CombatCreatureSnapshot snapshot,
-        string restoreContext)
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -696,7 +773,8 @@ public static partial class MultiplayerCombatStateSnapshotService
             }
 
             creatureNode.GetNodeOrNull<Node>("%HealthBar")?.Call("RefreshValues");
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
         }
         catch (Exception e)
         {
@@ -739,7 +817,11 @@ public static partial class MultiplayerCombatStateSnapshotService
         return true;
     }
 
-    private static async Task TrySynchronizeTestSubjectVisualStateAsync(Creature creature, CombatCreatureSnapshot snapshot, string restoreContext)
+    private static async Task TrySynchronizeTestSubjectVisualStateAsync(
+        Creature creature,
+        CombatCreatureSnapshot snapshot,
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -760,7 +842,8 @@ public static partial class MultiplayerCombatStateSnapshotService
                 animationId,
                 !string.Equals(animationId, TestSubjectDieAnimationId, StringComparison.Ordinal),
                 0);
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
         }
         catch (Exception e)
         {
@@ -1435,17 +1518,30 @@ public static partial class MultiplayerCombatStateSnapshotService
         }
     }
 
-    private static async Task RefreshEnemyIntentDisplaysAsync(CombatState? combatState)
+    private static async Task RefreshEnemyIntentDisplaysAsync(ICombatState? combatState)
     {
         var combatRoom = NCombatRoom.Instance;
-        if (combatState == null || combatRoom == null)
+        var mutableCombatState = CombatStateCompatibilityService.GetCombatState(combatState);
+        if (mutableCombatState == null || combatRoom == null)
             return;
 
-        foreach (var enemy in combatState.Creatures.Where(creature => creature.Player == null))
+        foreach (var enemy in mutableCombatState.Creatures.Where(creature => creature.Player == null))
         {
             var creatureNode = combatRoom.GetCreatureNode(enemy);
             if (creatureNode != null)
                 await creatureNode.RefreshIntents();
+        }
+    }
+
+    private static async Task TryRefreshEnemyIntentDisplaysAsync(CombatState? combatState, string restoreContext)
+    {
+        try
+        {
+            await RefreshEnemyIntentDisplaysAsync(combatState);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to refresh multiplayer enemy intents for {restoreContext}: {e.Message}");
         }
     }
 
@@ -1509,6 +1605,30 @@ public static partial class MultiplayerCombatStateSnapshotService
             visuals.Visible = true;
             visuals.Modulate = Colors.White;
             creatureNode.StartReviveAnim();
+        }
+    }
+
+    private static void RepositionPlayersAndPetsAfterRestore(CombatRoom combatRoom, CombatState combatState, string restoreContext)
+    {
+        var combatRoomNode = NCombatRoom.Instance;
+        var encounter = combatRoom.Encounter;
+        if (combatRoomNode == null || encounter == null)
+            return;
+
+        var allyNodes = combatRoomNode.CreatureNodes
+            .Where(node => node.Entity != null && combatState.Allies.Contains(node.Entity))
+            .ToList();
+        if (!allyNodes.Any(node => node.Entity.PetOwner != null))
+            return;
+
+        try
+        {
+            NCombatRoom.PositionPlayersAndPets(allyNodes, encounter.GetCameraScaling(), encounter.FullyCenterPlayers);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to reposition multiplayer players/pets after restore for {restoreContext}: {e.Message}");
         }
     }
 
@@ -1770,7 +1890,7 @@ public static partial class MultiplayerCombatStateSnapshotService
             if (snapshot.PlayersReadyToBeginEnemyTurnField != null)
                 TryRestoreField(combatManager, snapshot.PlayersReadyToBeginEnemyTurnField, "combat manager players-ready-to-begin-enemy-turn");
 
-            TryRestoreBooleanMember(combatManager, CombatManagerIsPlayPhaseProperty, CombatManagerIsPlayPhaseField, snapshot.IsPlayPhase, "combat manager IsPlayPhase");
+            CombatStateCompatibilityService.RestorePlayPhaseIfNeeded(combatManager, snapshot.IsPlayPhase);
             TryRestoreBooleanMember(combatManager, CombatManagerIsEnemyTurnStartedProperty, CombatManagerIsEnemyTurnStartedField, snapshot.IsEnemyTurnStarted, "combat manager IsEnemyTurnStarted");
             TryRestoreBooleanMember(combatManager, CombatManagerEndingPlayerTurnPhaseOneProperty, CombatManagerEndingPlayerTurnPhaseOneField, snapshot.EndingPlayerTurnPhaseOne, "combat manager EndingPlayerTurnPhaseOne");
             TryRestoreBooleanMember(combatManager, CombatManagerEndingPlayerTurnPhaseTwoProperty, CombatManagerEndingPlayerTurnPhaseTwoField, snapshot.EndingPlayerTurnPhaseTwo, "combat manager EndingPlayerTurnPhaseTwo");
@@ -2126,6 +2246,26 @@ public static partial class MultiplayerCombatStateSnapshotService
                 return byCombatId;
         }
 
+        var byPetOwner = FindPetCandidates(
+            combatState,
+            snapshot.MonsterId,
+            snapshot.PetOwnerPlayerId,
+            excludedCreatures);
+        if (byPetOwner.Count > 0)
+        {
+            if (!string.IsNullOrWhiteSpace(snapshot.SlotName))
+            {
+                var byPetSlot = byPetOwner.FirstOrDefault(creature =>
+                    string.Equals(creature.SlotName, snapshot.SlotName, StringComparison.Ordinal));
+                if (byPetSlot != null)
+                    return byPetSlot;
+            }
+
+            return snapshot.MonsterInstanceIndex >= 0 && snapshot.MonsterInstanceIndex < byPetOwner.Count
+                ? byPetOwner[snapshot.MonsterInstanceIndex]
+                : byPetOwner[0];
+        }
+
         if (!string.IsNullOrWhiteSpace(snapshot.SlotName))
         {
             var bySlot = combatState.Creatures.FirstOrDefault(creature =>
@@ -2165,6 +2305,22 @@ public static partial class MultiplayerCombatStateSnapshotService
                 return byCombatId;
         }
 
+        var byPetOwner = FindPetCandidates(combatState, reference.MonsterId, reference.PetOwnerPlayerId);
+        if (byPetOwner.Count > 0)
+        {
+            if (!string.IsNullOrWhiteSpace(reference.SlotName))
+            {
+                var byPetSlot = byPetOwner.FirstOrDefault(creature =>
+                    string.Equals(creature.SlotName, reference.SlotName, StringComparison.Ordinal));
+                if (byPetSlot != null)
+                    return byPetSlot;
+            }
+
+            return reference.MonsterInstanceIndex >= 0 && reference.MonsterInstanceIndex < byPetOwner.Count
+                ? byPetOwner[reference.MonsterInstanceIndex]
+                : byPetOwner[0];
+        }
+
         if (!string.IsNullOrWhiteSpace(reference.SlotName))
         {
             var bySlot = combatState.Creatures.FirstOrDefault(creature =>
@@ -2183,6 +2339,95 @@ public static partial class MultiplayerCombatStateSnapshotService
         return reference.MonsterInstanceIndex >= 0 && reference.MonsterInstanceIndex < byMonsterId.Count
             ? byMonsterId[reference.MonsterInstanceIndex]
             : byMonsterId[0];
+    }
+
+    private static List<Creature> FindPetCandidates(
+        CombatState combatState,
+        ModelId? monsterId,
+        ulong? petOwnerPlayerId,
+        ISet<Creature>? excludedCreatures = null)
+    {
+        if (monsterId == null
+            || !TryResolvePetOwnerPlayer(combatState, monsterId, petOwnerPlayerId, out var petOwner)
+            || petOwner == null)
+        {
+            return [];
+        }
+
+        return combatState.Creatures
+            .Where(creature => creature.Player == null
+                && creature.PetOwner?.NetId == petOwner.NetId
+                && creature.Monster?.Id == monsterId)
+            .Where(creature => excludedCreatures == null || !excludedCreatures.Contains(creature))
+            .ToList();
+    }
+
+    private static bool TryResolvePetOwnerPlayer(
+        CombatState combatState,
+        ModelId? monsterId,
+        ulong? petOwnerPlayerId,
+        out Player? petOwner)
+    {
+        petOwner = null;
+        if (petOwnerPlayerId.HasValue)
+        {
+            petOwner = combatState.GetPlayer(petOwnerPlayerId.Value);
+            return petOwner != null;
+        }
+
+        if (monsterId == null)
+            return false;
+
+        var distinctOwners = combatState.Creatures
+            .Where(creature => creature.Monster?.Id == monsterId && creature.PetOwner != null)
+            .Select(creature => creature.PetOwner!)
+            .GroupBy(owner => owner.NetId)
+            .Select(group => group.First())
+            .ToList();
+        if (distinctOwners.Count == 1)
+        {
+            petOwner = distinctOwners[0];
+            return true;
+        }
+
+        return TryResolveKnownPetOwnerPlayer(combatState, monsterId, out petOwner);
+    }
+
+    private static bool TryResolveKnownPetOwnerPlayer(CombatState? combatState, ModelId? monsterId, out Player? petOwner)
+    {
+        petOwner = null;
+        if (combatState == null
+            || monsterId == null
+            || !KnownPetOwnerCharacterIdsByMonsterId.TryGetValue(monsterId.Entry, out var ownerCharacterId))
+        {
+            return false;
+        }
+
+        var matchingPlayers = combatState.Players
+            .Where(player => string.Equals(player.Character.Id.Entry, ownerCharacterId, StringComparison.Ordinal))
+            .ToList();
+        if (matchingPlayers.Count != 1)
+            return false;
+
+        petOwner = matchingPlayers[0];
+        return true;
+    }
+
+    private static ulong? ResolveCapturedPetOwnerPlayerId(Creature? creature, ModelId? monsterId)
+    {
+        if (creature?.PetOwner != null)
+            return creature.PetOwner.NetId;
+
+        if (!TryResolveKnownPetOwnerPlayer(creature?.CombatState, monsterId, out var petOwner) || petOwner == null)
+            return null;
+
+        var creatureLabel = creature == null
+            ? monsterId?.Entry ?? "unknown"
+            : DescribeCreatureForLog(creature);
+        MainFile.Logger.Warn(
+            $"Inferred missing multiplayer pet owner {petOwner.NetId} while capturing snapshot creature " +
+            $"{creatureLabel}.");
+        return petOwner.NetId;
     }
 
     private static int GetMonsterInstanceIndex(Creature creature)
@@ -2593,8 +2838,7 @@ public static partial class MultiplayerCombatStateSnapshotService
                 PlayerActionsDisabledField = CaptureField(combatManager, CombatManagerPlayerActionsDisabledField),
                 PlayersReadyToEndTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToEndTurnField),
                 PlayersReadyToBeginEnemyTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToBeginEnemyTurnField),
-                IsPlayPhase = TryReadBoolProperty(CombatManagerIsPlayPhaseProperty, combatManager)
-                    ?? TryReadNullableBoolField(CombatManagerIsPlayPhaseField, combatManager),
+                IsPlayPhase = CombatStateCompatibilityService.IsPlayPhase(CombatStateCompatibilityService.GetCurrentCombatState()),
                 IsEnemyTurnStarted = TryReadBoolProperty(CombatManagerIsEnemyTurnStartedProperty, combatManager)
                     ?? TryReadNullableBoolField(CombatManagerIsEnemyTurnStartedField, combatManager),
                 EndingPlayerTurnPhaseOne = TryReadBoolProperty(CombatManagerEndingPlayerTurnPhaseOneProperty, combatManager)
@@ -2712,6 +2956,7 @@ public static partial class MultiplayerCombatStateSnapshotService
         public int MonsterInstanceIndex { get; set; }
         public uint? CombatId { get; set; }
         public string? SlotName { get; set; }
+        public ulong? PetOwnerPlayerId { get; set; }
         public string? CurrentMoveFollowUpStateId { get; set; }
         public bool IsTemporaryStunned { get; set; }
         public string? CurrentMoveStateId { get; set; }
@@ -2731,6 +2976,7 @@ public static partial class MultiplayerCombatStateSnapshotService
                 MonsterInstanceIndex = monsterInstanceIndex,
                 CombatId = creature?.CombatId,
                 SlotName = creature?.SlotName,
+                PetOwnerPlayerId = ResolveCapturedPetOwnerPlayerId(creature, state.monsterId),
                 CurrentMoveFollowUpStateId = creature?.Monster?.NextMove?.FollowUpStateId,
                 IsTemporaryStunned = string.Equals(creature?.Monster?.NextMove?.Id, "STUNNED", StringComparison.Ordinal),
                 PlayerId = state.playerId,
@@ -2830,6 +3076,7 @@ public static partial class MultiplayerCombatStateSnapshotService
         public ulong? PlayerId { get; set; }
         public uint? CombatId { get; set; }
         public string? SlotName { get; set; }
+        public ulong? PetOwnerPlayerId { get; set; }
         public ModelId? MonsterId { get; set; }
         public int MonsterInstanceIndex { get; set; }
 
@@ -2843,6 +3090,7 @@ public static partial class MultiplayerCombatStateSnapshotService
                 PlayerId = creature.Player?.NetId,
                 CombatId = creature.Player == null ? creature.CombatId : null,
                 SlotName = creature.Player == null ? creature.SlotName : null,
+                PetOwnerPlayerId = creature.PetOwner?.NetId,
                 MonsterId = creature.Monster?.Id,
                 MonsterInstanceIndex = GetMonsterInstanceIndex(creature)
             };
@@ -3021,6 +3269,9 @@ public static partial class MultiplayerCombatStateSnapshotService
     private static string DescribeSnapshotCreatureForLog(CombatCreatureSnapshot snapshot)
     {
         var monsterId = snapshot.MonsterId?.Entry ?? "unknown";
+        if (snapshot.PetOwnerPlayerId.HasValue)
+            return $"{monsterId}:pet:{snapshot.PetOwnerPlayerId.Value}:index:{snapshot.MonsterInstanceIndex}";
+
         return string.IsNullOrWhiteSpace(snapshot.SlotName) ? monsterId : $"{monsterId}:{snapshot.SlotName}";
     }
 
@@ -3030,6 +3281,9 @@ public static partial class MultiplayerCombatStateSnapshotService
             return $"player:{reference.PlayerId.Value}";
 
         var monsterId = reference.MonsterId?.Entry ?? "unknown";
+        if (reference.PetOwnerPlayerId.HasValue)
+            return $"{monsterId}:pet:{reference.PetOwnerPlayerId.Value}:index:{reference.MonsterInstanceIndex}";
+
         if (!string.IsNullOrWhiteSpace(reference.SlotName))
             return $"{monsterId}:{reference.SlotName}";
 
@@ -3045,6 +3299,9 @@ public static partial class MultiplayerCombatStateSnapshotService
             return $"player:{creature.Player.NetId}";
 
         var monsterId = creature.Monster?.Id.Entry ?? "unknown";
+        if (creature.PetOwner != null)
+            return $"{monsterId}:pet:{creature.PetOwner.NetId}";
+
         return string.IsNullOrWhiteSpace(creature.SlotName) ? monsterId : $"{monsterId}:{creature.SlotName}";
     }
 }

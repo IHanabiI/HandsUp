@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -6,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
@@ -14,8 +16,12 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.UI;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Orbs;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Orbs;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
@@ -32,6 +38,32 @@ public static partial class MultiplayerCombatStateSnapshotService
         .GetMethod("OnCombatStateChanged", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? EndTurnButtonOnTurnStartedMethod = typeof(NEndTurnButton)
         .GetMethod("OnTurnStarted", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NCardPlayQueueItemsField = typeof(NCardPlayQueue)
+        .GetField("_playQueue", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly Type? NCardPlayQueueItemType = typeof(NCardPlayQueue)
+        .GetNestedType("QueueItem", BindingFlags.NonPublic);
+    private static readonly FieldInfo? NCardPlayQueueItemCardField = NCardPlayQueueItemType
+        ?.GetField("card", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NCardPlayQueueItemCurrentTweenField = NCardPlayQueueItemType
+        ?.GetField("currentTween", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly FieldInfo? CombatCardPileCurrentCountField = typeof(NCombatCardPile)
+        .GetField("_currentCount", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? CombatCardPileCountLabelField = typeof(NCombatCardPile)
+        .GetField("_countLabel", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NOrbManagerOrbContainerField = typeof(NOrbManager)
+        .GetField("_orbContainer", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NOrbManagerOrbsField = typeof(NOrbManager)
+        .GetField("_orbs", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NOrbManagerCurrentTweenField = typeof(NOrbManager)
+        .GetField("_curTween", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? NOrbManagerTweenLayoutMethod = typeof(NOrbManager)
+        .GetMethod("TweenLayout", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? NOrbManagerUpdateControllerNavigationMethod = typeof(NOrbManager)
+        .GetMethod("UpdateControllerNavigation", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? DarkOrbEvokeValueField = typeof(DarkOrb)
+        .GetField("_evokeVal", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? GlassOrbPassiveValueField = typeof(GlassOrb)
+        .GetField("_passiveVal", BindingFlags.Instance | BindingFlags.NonPublic);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -83,18 +115,23 @@ public static partial class MultiplayerCombatStateSnapshotService
         RestoreCreatureStates(combatState, snapshot.Creatures, restoreContext, resolutionContext);
         RemoveCreaturesMissingFromSnapshot(combatState, snapshot, restoreContext, resolutionContext);
         RestorePlayerStates(runState, snapshot.Players);
+        NormalizeHookSensitivePlayerStateForMultiplayerRestore(combatState, restoreContext);
         await RestoreCreatureExtrasAsync(combatState, snapshot.Creatures, restoreContext, resolutionContext);
         RestorePowerExtras(runState, combatState, snapshot.Creatures, restoreContext, resolutionContext);
         CombatManager.Instance.StateTracker.SetState(combatState);
         RestoreCombatManagerState(snapshot.CombatManager, restoreContext);
         await ReconcileCombatRoomCreatureNodes(combatState, snapshot.Creatures, restoreContext, resolutionContext);
-        TryRefreshLocalCombatUi(runState, combatState, snapshot.RoundNumber, restoreContext);
-        await TryRefreshLocalCombatUiAfterDelayAsync(runState, combatRoom, combatState, snapshot.RoundNumber, restoreContext);
         await SynchronizePostRestoreSpecialPowerStateAsync(combatState, snapshot.Creatures, restoreContext, resolutionContext);
+        RepositionPlayersAndPetsAfterRestore(combatRoom, combatState, restoreContext);
+        await TryRefreshEnemyIntentDisplaysAsync(combatState, restoreContext);
         RestoreHiddenLiveAllyVisuals(combatState, restoreContext);
+        SynchronizePlayerOrbManagersForMultiplayerRestore(combatState, restoreContext);
 
         foreach (var player in combatState.Players)
             player.PlayerCombatState?.RecalculateCardValues();
+
+        TryRefreshLocalCombatUi(runState, combatState, snapshot.RoundNumber, restoreContext);
+        await TryRefreshLocalCombatUiAfterDelayAsync(runState, combatRoom, combatState, snapshot.RoundNumber, restoreContext);
 
         MainFile.Logger.Info($"Applied multiplayer combat snapshot for {restoreContext}.");
         return true;
@@ -224,7 +261,7 @@ public static partial class MultiplayerCombatStateSnapshotService
             combat.Energy = snapshot.Energy;
             combat.Stars = snapshot.Stars;
             RestorePlayerPiles(runState, player, snapshot.Piles);
-            RestorePlayerOrbs(combat, snapshot.Orbs);
+            RestorePlayerOrbs(player, combat, snapshot.Orbs);
         }
     }
 
@@ -263,10 +300,10 @@ public static partial class MultiplayerCombatStateSnapshotService
         CombatStateAddCardMethod?.Invoke(CombatStateCompatibilityService.GetRawCombatState(card.Owner?.Creature), [card]);
     }
 
-    private static void RestorePlayerOrbs(PlayerCombatState combat, IReadOnlyList<CombatOrbSnapshot> orbSnapshots)
+    private static void RestorePlayerOrbs(Player player, PlayerCombatState combat, IReadOnlyList<CombatOrbSnapshot> orbSnapshots)
     {
         var orbQueue = combat.OrbQueue;
-        var capacity = orbQueue.Capacity;
+        var capacity = Math.Max(orbQueue.Capacity, orbSnapshots.Count);
         orbQueue.Clear();
         orbQueue.AddCapacity(capacity);
 
@@ -274,7 +311,53 @@ public static partial class MultiplayerCombatStateSnapshotService
         {
             var orbSnapshot = orbSnapshots[index];
             var orb = ModelDb.GetById<OrbModel>(orbSnapshot.Id).ToMutable();
+            orb.Owner = player;
+            RestoreOrbSnapshotState(orb, orbSnapshot);
             orbQueue.Insert(index, orb);
+        }
+    }
+
+    private static void NormalizeHookSensitivePlayerStateForMultiplayerRestore(CombatState combatState, string restoreContext)
+    {
+        foreach (var player in combatState.Players)
+            NormalizePlayerOrbOwnershipForMultiplayerRestore(player, restoreContext);
+    }
+
+    private static void NormalizePlayerOrbOwnershipForMultiplayerRestore(Player player, string restoreContext)
+    {
+        var orbQueue = player.PlayerCombatState?.OrbQueue;
+        if (orbQueue == null)
+            return;
+
+        var repairedOwnerCount = 0;
+        var nullOrbCount = 0;
+        foreach (var orb in orbQueue.Orbs)
+        {
+            if (orb == null)
+            {
+                nullOrbCount++;
+                continue;
+            }
+
+            if (ReferenceEquals(orb.Owner, player))
+                continue;
+
+            orb.Owner = player;
+            repairedOwnerCount++;
+        }
+
+        if (repairedOwnerCount > 0)
+        {
+            MainFile.Logger.Info(
+                $"Rebound {repairedOwnerCount} multiplayer orb owner reference(s) before hook-sensitive restore work for {restoreContext}. " +
+                $"Player={player.NetId} Orbs={orbQueue.Orbs.Count}/{orbQueue.Capacity}");
+        }
+
+        if (nullOrbCount > 0)
+        {
+            MainFile.Logger.Warn(
+                $"Detected {nullOrbCount} null orb slot reference(s) before hook-sensitive multiplayer restore work for {restoreContext}. " +
+                $"Player={player.NetId} Orbs={orbQueue.Orbs.Count}/{orbQueue.Capacity}");
         }
     }
 
@@ -287,6 +370,15 @@ public static partial class MultiplayerCombatStateSnapshotService
     {
         try
         {
+            ClearTransientLocalCombatCardUi();
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to clear transient multiplayer combat UI for {restoreContext}: {e.Message}");
+        }
+
+        try
+        {
             RebuildLocalHandUi(runState);
         }
         catch (Exception e)
@@ -296,13 +388,17 @@ public static partial class MultiplayerCombatStateSnapshotService
 
         try
         {
-            var handUi = NPlayerHand.Instance;
-            if (handUi != null)
-                HandOnCombatStateChangedMethod?.Invoke(handUi, [combatState]);
+            RefreshLocalCombatPileUi(runState);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to refresh local multiplayer combat piles for {restoreContext}: {e.Message}");
+        }
 
-            var endTurnButton = NCombatRoom.Instance?.Ui?.EndTurnButton;
-            if (endTurnButton != null && combatState.CurrentSide == CombatSide.Player)
-                EndTurnButtonOnTurnStartedMethod?.Invoke(endTurnButton, [combatState]);
+        try
+        {
+            RefreshCombatUiState(combatState);
+            ShowPlayerTurnBannerIfNeeded(roundNumber);
         }
         catch (Exception e)
         {
@@ -341,6 +437,206 @@ public static partial class MultiplayerCombatStateSnapshotService
         }
 
         handUi.ForceRefreshCardIndices();
+    }
+
+    private static void ClearTransientLocalCombatCardUi()
+    {
+        var combatUi = NCombatRoom.Instance?.Ui;
+        if (combatUi == null)
+            return;
+
+        ClearPlayQueueUi(combatUi.PlayQueue);
+        ClearTransientCardNodes(combatUi.PlayContainer);
+        ClearTransientCardNodes(NCombatRoom.Instance?.CombatVfxContainer);
+        ClearTransientCardNodes(NRun.Instance?.GlobalUi?.TopBar?.TrailContainer);
+    }
+
+    private static void ClearPlayQueueUi(NCardPlayQueue? playQueue)
+    {
+        if (playQueue == null)
+            return;
+
+        try
+        {
+            if (NCardPlayQueueItemsField?.GetValue(playQueue) is IList queueItems)
+            {
+                foreach (var queueItem in queueItems.Cast<object>().ToList())
+                {
+                    if (NCardPlayQueueItemCurrentTweenField?.GetValue(queueItem) is Tween tween)
+                        tween.Kill();
+
+                    if (NCardPlayQueueItemCardField?.GetValue(queueItem) is NCard cardNode)
+                        ForceRemoveCardNodeImmediately(cardNode);
+                }
+
+                queueItems.Clear();
+            }
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to clear stale play-queue cards during multiplayer combat UI refresh: {e.Message}");
+        }
+
+        foreach (var cardNode in playQueue.GetChildren().OfType<NCard>().ToList())
+            ForceRemoveCardNodeImmediately(cardNode);
+    }
+
+    private static void ClearTransientCardNodes(Node? container)
+    {
+        if (container == null)
+            return;
+
+        foreach (var cardNode in container.GetChildren().OfType<NCard>().ToList())
+            ForceRemoveCardNodeImmediately(cardNode);
+    }
+
+    private static void RefreshLocalCombatPileUi(RunState runState)
+    {
+        var combatUi = NCombatRoom.Instance?.Ui;
+        var localPlayer = LocalContext.GetMe(runState);
+        if (combatUi == null || localPlayer?.PlayerCombatState == null)
+            return;
+
+        SyncCombatPileButtonState(combatUi.DrawPile, CardPile.Get(PileType.Draw, localPlayer));
+        SyncCombatPileButtonState(combatUi.DiscardPile, CardPile.Get(PileType.Discard, localPlayer));
+        SyncCombatPileButtonState(combatUi.ExhaustPile, CardPile.Get(PileType.Exhaust, localPlayer));
+    }
+
+    private static void SyncCombatPileButtonState(NCombatCardPile? pileButton, CardPile? pile)
+    {
+        if (pileButton == null || pile == null)
+            return;
+
+        var count = pile.Cards.Count;
+        CombatCardPileCurrentCountField?.SetValue(pileButton, count);
+
+        if (CombatCardPileCountLabelField?.GetValue(pileButton) is Control countLabel)
+        {
+            countLabel.GetType()
+                .GetMethod("SetTextAutoSize", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, [typeof(string)])
+                ?.Invoke(countLabel, [count.ToString()]);
+            countLabel.PivotOffset = countLabel.Size * 0.5f;
+        }
+
+        if (pileButton is not NExhaustPileButton exhaustPileButton)
+            return;
+
+        if (count > 0)
+        {
+            exhaustPileButton.Visible = true;
+            exhaustPileButton.Enable();
+            return;
+        }
+
+        exhaustPileButton.Visible = false;
+        exhaustPileButton.Disable();
+    }
+
+    private static void SynchronizePlayerOrbManagersForMultiplayerRestore(CombatState combatState, string restoreContext)
+    {
+        foreach (var player in combatState.Players)
+            TrySynchronizePlayerOrbManagerForMultiplayerRestore(player, restoreContext);
+    }
+
+    private static void TrySynchronizePlayerOrbManagerForMultiplayerRestore(Player player, string restoreContext)
+    {
+        var orbQueue = player.PlayerCombatState?.OrbQueue;
+        var orbManager = NCombatRoom.Instance?.GetCreatureNode(player.Creature)?.OrbManager;
+        if (orbQueue == null || orbManager == null)
+            return;
+
+        try
+        {
+            RebuildOrbManagerVisualsFromQueue(orbManager, orbQueue);
+
+            if (orbQueue.Capacity > 0 || orbQueue.Orbs.Count > 0)
+            {
+                MainFile.Logger.Info(
+                    $"Rebuilt multiplayer orb visuals after restore for {restoreContext}. " +
+                    $"Player={player.NetId} Orbs={orbQueue.Orbs.Count}/{orbQueue.Capacity}");
+            }
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to rebuild multiplayer orb visuals after restore for {restoreContext}. " +
+                $"Player={player.NetId}: {e.Message}");
+        }
+    }
+
+    private static void RebuildOrbManagerVisualsFromQueue(NOrbManager orbManager, OrbQueue orbQueue)
+    {
+        if (NOrbManagerOrbContainerField?.GetValue(orbManager) is not Control orbContainer
+            || NOrbManagerOrbsField?.GetValue(orbManager) is not IList orbNodes)
+        {
+            return;
+        }
+
+        if (NOrbManagerCurrentTweenField?.GetValue(orbManager) is Tween currentTween)
+            currentTween.Kill();
+
+        foreach (var orbNode in orbContainer.GetChildren().OfType<NOrb>().ToList())
+            ForceRemoveOrbNodeImmediately(orbNode);
+
+        orbNodes.Clear();
+
+        foreach (var orb in orbQueue.Orbs)
+            AddOrbNodeToManager(orbContainer, orbNodes, NOrb.Create(orbManager.IsLocal, orb));
+
+        for (var index = orbQueue.Orbs.Count; index < orbQueue.Capacity; index++)
+            AddOrbNodeToManager(orbContainer, orbNodes, NOrb.Create(orbManager.IsLocal));
+
+        NOrbManagerTweenLayoutMethod?.Invoke(orbManager, []);
+        NOrbManagerUpdateControllerNavigationMethod?.Invoke(orbManager, []);
+        orbManager.UpdateVisuals(OrbEvokeType.None);
+    }
+
+    private static void AddOrbNodeToManager(Control orbContainer, IList orbNodes, NOrb orbNode)
+    {
+        orbContainer.AddChild(orbNode);
+        orbNodes.Add(orbNode);
+        orbNode.Position = Vector2.Zero;
+    }
+
+    private static void ForceRemoveOrbNodeImmediately(NOrb orbNode)
+    {
+        try
+        {
+            orbNode.Visible = false;
+            orbNode.GetParent()?.RemoveChild(orbNode);
+            orbNode.QueueFree();
+        }
+        catch
+        {
+            // Best-effort cleanup only.
+        }
+    }
+
+    private static void RestoreOrbSnapshotState(OrbModel orb, CombatOrbSnapshot orbSnapshot)
+    {
+        switch (orb)
+        {
+            case DarkOrb:
+                DarkOrbEvokeValueField?.SetValue(orb, (decimal)orbSnapshot.Evoke);
+                break;
+            case GlassOrb:
+                GlassOrbPassiveValueField?.SetValue(orb, (decimal)orbSnapshot.Passive);
+                break;
+        }
+    }
+
+    private static void ForceRemoveCardNodeImmediately(NCard node)
+    {
+        try
+        {
+            node.Visible = false;
+            node.GetParent()?.RemoveChild(node);
+            node.QueueFree();
+        }
+        catch
+        {
+            // Best-effort cleanup only. The normal UI cleanup path has already run.
+        }
     }
 
     public sealed partial class CombatStateSnapshot

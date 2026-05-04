@@ -527,10 +527,46 @@ public static class MultiplayerExecutionService
             throw new System.InvalidOperationException("Failed to resolve RunManager initialization methods for multiplayer restart.");
 
         StateProperty.SetValue(runManager, runState);
-        InitializeSharedMethod.Invoke(runManager, [netService, new PeerInputSynchronizer(netService), true, dailyTime, System.DateTimeOffset.UtcNow.ToUnixTimeSeconds(), 0L, 0L]);
+        InitializeSharedMethod.Invoke(runManager, BuildInitializeSharedArguments(netService, dailyTime));
         runManager.InitializeRunLobby(netService, runState);
         InitializeNewRunMethod.Invoke(runManager, []);
         runManager.GenerateRooms();
+    }
+
+    private static object?[] BuildInitializeSharedArguments(
+        INetGameService netService,
+        System.DateTimeOffset? dailyTime)
+    {
+        var parameterCount = InitializeSharedMethod?.GetParameters().Length ?? 0;
+        var inputSynchronizer = new PeerInputSynchronizer(netService);
+        var startTime = System.DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        return parameterCount switch
+        {
+            7 =>
+            [
+                netService,
+                inputSynchronizer,
+                true,
+                dailyTime,
+                startTime,
+                0L,
+                0L
+            ],
+            8 =>
+            [
+                netService,
+                inputSynchronizer,
+                true,
+                dailyTime,
+                startTime,
+                0L,
+                0L,
+                0
+            ],
+            _ => throw new System.InvalidOperationException(
+                $"Unsupported RunManager.InitializeShared signature for multiplayer restart. ParameterCount={parameterCount}.")
+        };
     }
 
     private static SerializableRun? ParseSerializableRun(string? runJson, string actionLabel)

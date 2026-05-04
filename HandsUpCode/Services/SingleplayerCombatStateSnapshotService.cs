@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -19,12 +20,16 @@ using MegaCrit.Sts2.Core.Entities.UI;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Monsters;
+using MegaCrit.Sts2.Core.Models.Orbs;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Multiplayer.Replay;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Orbs;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Vfx;
 using MegaCrit.Sts2.Core.Nodes.Vfx.Backgrounds;
@@ -78,6 +83,21 @@ public static class SingleplayerCombatStateSnapshotService
         .GetMethod("AreCardActionsAllowed", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? EndTurnButtonOnTurnStartedMethod = typeof(NEndTurnButton)
         .GetMethod("OnTurnStarted", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NCardPlayQueueItemsField = typeof(NCardPlayQueue)
+        .GetField("_playQueue", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly Type? NCardPlayQueueItemType = typeof(NCardPlayQueue)
+        .GetNestedType("QueueItem", BindingFlags.NonPublic);
+    private static readonly FieldInfo? NCardPlayQueueItemCardField = NCardPlayQueueItemType
+        ?.GetField("card", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NCardPlayQueueItemCurrentTweenField = NCardPlayQueueItemType
+        ?.GetField("currentTween", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly FieldInfo? CombatCardPileCurrentCountField = typeof(NCombatCardPile)
+        .GetField("_currentCount", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? CombatCardPileCountLabelField = typeof(NCombatCardPile)
+        .GetField("_countLabel", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? MonsterModelNextMoveSetter = typeof(MonsterModel)
+        .GetProperty("NextMove", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?
+        .GetSetMethod(true);
     private static readonly FieldInfo? MoveStateMachineCurrentStateField = typeof(MonsterMoveStateMachine)
         .GetField("_currentState", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? MoveStateMachinePerformedFirstMoveField = typeof(MonsterMoveStateMachine)
@@ -101,6 +121,16 @@ public static class SingleplayerCombatStateSnapshotService
         .GetField("_creatureNodes", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? NCombatRoomRemovingCreatureNodesField = typeof(NCombatRoom)
         .GetField("_removingCreatureNodes", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NOrbManagerOrbContainerField = typeof(NOrbManager)
+        .GetField("_orbContainer", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NOrbManagerOrbsField = typeof(NOrbManager)
+        .GetField("_orbs", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? NOrbManagerCurrentTweenField = typeof(NOrbManager)
+        .GetField("_curTween", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? NOrbManagerTweenLayoutMethod = typeof(NOrbManager)
+        .GetMethod("TweenLayout", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? NOrbManagerUpdateControllerNavigationMethod = typeof(NOrbManager)
+        .GetMethod("UpdateControllerNavigation", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? CombatManagerPlayerActionsDisabledField = typeof(CombatManager)
         .GetField("_playerActionsDisabled", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? CombatManagerPlayersReadyToEndTurnField = typeof(CombatManager)
@@ -132,6 +162,10 @@ public static class SingleplayerCombatStateSnapshotService
     private static readonly FieldInfo? CombatManagerEndingPlayerTurnPhaseTwoField = typeof(CombatManager)
         .GetField("<EndingPlayerTurnPhaseTwo>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)
         ?? typeof(CombatManager).GetField("_endingPlayerTurnPhaseTwo", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? DarkOrbEvokeValueField = typeof(DarkOrb)
+        .GetField("_evokeVal", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? GlassOrbPassiveValueField = typeof(GlassOrb)
+        .GetField("_passiveVal", BindingFlags.Instance | BindingFlags.NonPublic);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -203,14 +237,17 @@ public static class SingleplayerCombatStateSnapshotService
         RestoreCombatManagerState(snapshot.CombatManager, restoreContext);
         await ReconcileCombatRoomCreatureNodes(combatState, snapshot.Creatures, restoreContext, resolutionContext);
         ReinitializeCombatReplayWriter(restoreContext);
-        TryRefreshLocalCombatUi(runState, combatState, snapshot.RoundNumber, restoreContext);
-        await TryRefreshLocalCombatUiAfterDelayAsync(runState, combatRoom, combatState, snapshot.RoundNumber, restoreContext);
         await SynchronizePostRestoreSpecialPowerStateAsync(combatState, snapshot.Creatures, restoreContext, resolutionContext);
         LogKaiserCrabRocketRestoreDebug(combatState, snapshot.Creatures, restoreContext, "after-post-restore-power-sync");
+        await TryRefreshEnemyIntentDisplaysAsync(combatState, restoreContext);
         RestoreHiddenLiveAllyVisuals(combatState, restoreContext);
+        SynchronizePlayerOrbManagersForSingleplayerRestore(combatState, restoreContext);
 
         foreach (var player in combatState.Players)
             player.PlayerCombatState?.RecalculateCardValues();
+
+        TryRefreshLocalCombatUi(runState, combatState, snapshot.RoundNumber, restoreContext);
+        await TryRefreshLocalCombatUiAfterDelayAsync(runState, combatRoom, combatState, snapshot.RoundNumber, restoreContext);
 
         MainFile.Logger.Info($"Applied singleplayer combat snapshot for {restoreContext}.");
         return true;
@@ -457,7 +494,7 @@ public static class SingleplayerCombatStateSnapshotService
             combat.Energy = snapshot.Energy;
             combat.Stars = snapshot.Stars;
             RestorePlayerPiles(runState, player, snapshot.Piles);
-            RestorePlayerOrbs(combat, snapshot.Orbs);
+            RestorePlayerOrbs(player, combat, snapshot.Orbs);
         }
     }
 
@@ -483,14 +520,14 @@ public static class SingleplayerCombatStateSnapshotService
                     continue;
             }
 
+            foreach (var fieldSnapshot in snapshot.SpecialFields)
+            {
+                TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId}");
+            }
+
             if (await TryRestoreIllusionReviveMoveStateAsync(creature, snapshot, restoreContext))
             {
-                foreach (var fieldSnapshot in snapshot.SpecialFields)
-                {
-                    TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId}");
-                }
-
-                await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext);
+                await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays: false);
                 continue;
             }
 
@@ -498,19 +535,7 @@ public static class SingleplayerCombatStateSnapshotService
                 && moveStateMachine.States.TryGetValue(snapshot.CurrentMoveStateId, out var currentState)
                 && currentState is MoveState moveState)
             {
-                ApplyFollowUpStateSnapshot(moveStateMachine, moveState, snapshot, creature);
-                monster.SetMoveImmediate(moveState, true);
-                moveStateMachine.StateLog.Clear();
-                foreach (var stateId in snapshot.MoveStateLogIds)
-                {
-                    if (moveStateMachine.States.TryGetValue(stateId, out var loggedState))
-                        moveStateMachine.StateLog.Add(loggedState);
-                }
-
-                MoveStateMachineCurrentStateField?.SetValue(moveStateMachine, moveState);
-                MoveStateMachinePerformedFirstMoveField?.SetValue(moveStateMachine, snapshot.PerformedFirstMove);
-                if (!snapshot.IsTemporaryStunned)
-                    creature?.PrepareForNextTurn(combatState.PlayerCreatures, false);
+                RestoreMonsterMoveStateSilently(monster, moveStateMachine, moveState, snapshot, creature, restoreContext);
             }
             else if (!string.IsNullOrWhiteSpace(snapshot.CurrentMoveStateId))
             {
@@ -519,13 +544,38 @@ public static class SingleplayerCombatStateSnapshotService
                     $"because it was not present after restore. Slot={snapshot.SlotName}, TemporaryStunned={snapshot.IsTemporaryStunned}");
             }
 
-            foreach (var fieldSnapshot in snapshot.SpecialFields)
-            {
-                TryRestoreField(monster, fieldSnapshot, $"monster {snapshot.MonsterId}");
-            }
-
-            await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeSpecialMonsterStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays: false);
         }
+    }
+
+    private static void RestoreMonsterMoveStateSilently(
+        MonsterModel monster,
+        MonsterMoveStateMachine moveStateMachine,
+        MoveState moveState,
+        CombatCreatureSnapshot snapshot,
+        Creature? creature,
+        string restoreContext)
+    {
+        if (MonsterModelNextMoveSetter == null)
+        {
+            MainFile.Logger.Warn(
+                $"Skipped restoring singleplayer move state {snapshot.CurrentMoveStateId ?? "unknown"} for monster {snapshot.MonsterId ?? creature?.Monster?.Id.Entry ?? "unknown"} " +
+                $"because NextMove setter could not be reflected during {restoreContext}.");
+            return;
+        }
+
+        ApplyFollowUpStateSnapshot(moveStateMachine, moveState, snapshot, creature);
+        MonsterModelNextMoveSetter.Invoke(monster, [moveState]);
+
+        moveStateMachine.StateLog.Clear();
+        foreach (var stateId in snapshot.MoveStateLogIds)
+        {
+            if (moveStateMachine.States.TryGetValue(stateId, out var loggedState))
+                moveStateMachine.StateLog.Add(loggedState);
+        }
+
+        MoveStateMachineCurrentStateField?.SetValue(moveStateMachine, moveState);
+        MoveStateMachinePerformedFirstMoveField?.SetValue(moveStateMachine, snapshot.PerformedFirstMove);
     }
 
     private static async Task<bool> TryRestoreIllusionReviveMoveStateAsync(Creature? creature, CombatCreatureSnapshot snapshot, string restoreContext)
@@ -559,35 +609,39 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    private static async Task TrySynchronizeSpecialMonsterStateAsync(Creature? creature, CombatCreatureSnapshot snapshot, string restoreContext)
+    private static async Task TrySynchronizeSpecialMonsterStateAsync(
+        Creature? creature,
+        CombatCreatureSnapshot snapshot,
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         if (creature?.Monster is Rocket)
         {
-            await TrySynchronizeKaiserCrabRocketStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeKaiserCrabRocketStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is TestSubject)
         {
-            await TrySynchronizeTestSubjectVisualStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeTestSubjectVisualStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is Doormaker doormaker)
         {
-            await TrySynchronizeDoormakerVisualStateAsync(creature, doormaker, snapshot, restoreContext);
+            await TrySynchronizeDoormakerVisualStateAsync(creature, doormaker, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is OwlMagistrate)
         {
-            await TrySynchronizeOwlMagistrateVisualStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeOwlMagistrateVisualStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
         if (creature?.Monster is KnowledgeDemon)
         {
-            await TrySynchronizeKnowledgeDemonVisualStateAsync(creature, snapshot, restoreContext);
+            await TrySynchronizeKnowledgeDemonVisualStateAsync(creature, snapshot, restoreContext, refreshIntentDisplays);
             return;
         }
 
@@ -599,7 +653,7 @@ public static class SingleplayerCombatStateSnapshotService
 
         if (!toughEgg.IsHatched)
         {
-            if (creatureNode != null)
+            if (refreshIntentDisplays && creatureNode != null)
                 await creatureNode.RefreshIntents();
             return;
         }
@@ -609,7 +663,7 @@ public static class SingleplayerCombatStateSnapshotService
             await CreatureCmd.TriggerAnim(creature, "Hatch", 0.5f);
 
             RepositionToughEggNode(creature, toughEgg, snapshot, creatureNode);
-            if (creatureNode != null)
+            if (refreshIntentDisplays && creatureNode != null)
                 await creatureNode.RefreshIntents();
 
             MainFile.Logger.Info(
@@ -627,7 +681,8 @@ public static class SingleplayerCombatStateSnapshotService
     private static async Task TrySynchronizeKnowledgeDemonVisualStateAsync(
         Creature creature,
         CombatCreatureSnapshot snapshot,
-        string restoreContext)
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -650,7 +705,8 @@ public static class SingleplayerCombatStateSnapshotService
             ForceCreatureLoopAnimation(creatureNode, targetAnimationId);
             SynchronizeKnowledgeDemonBurningVfx(creatureNode, isBurnt);
 
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
 
             MainFile.Logger.Info(
                 $"Synchronized Knowledge Demon visual state during singleplayer combat snapshot restore for {restoreContext}. " +
@@ -702,7 +758,11 @@ public static class SingleplayerCombatStateSnapshotService
         return null;
     }
 
-    private static async Task TrySynchronizeKaiserCrabRocketStateAsync(Creature creature, CombatCreatureSnapshot snapshot, string restoreContext)
+    private static async Task TrySynchronizeKaiserCrabRocketStateAsync(
+        Creature creature,
+        CombatCreatureSnapshot snapshot,
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -710,7 +770,7 @@ public static class SingleplayerCombatStateSnapshotService
             TrySynchronizeKaiserCrabRocketVisualState(snapshot, restoreContext);
 
             var creatureNode = NCombatRoom.Instance?.GetCreatureNode(creature);
-            if (creatureNode != null)
+            if (refreshIntentDisplays && creatureNode != null)
                 await creatureNode.RefreshIntents();
 
             LogKaiserCrabRocketRestoreDebug(
@@ -737,7 +797,8 @@ public static class SingleplayerCombatStateSnapshotService
         Creature creature,
         Doormaker doormaker,
         CombatCreatureSnapshot snapshot,
-        string restoreContext)
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -775,7 +836,8 @@ public static class SingleplayerCombatStateSnapshotService
             }
 
             creatureNode.GetNodeOrNull<Node>("%HealthBar")?.Call("RefreshValues");
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
 
             MainFile.Logger.Info(
                 $"Synchronized Doormaker phase state during singleplayer combat snapshot restore for {restoreContext}. " +
@@ -832,7 +894,8 @@ public static class SingleplayerCombatStateSnapshotService
     private static async Task TrySynchronizeOwlMagistrateVisualStateAsync(
         Creature creature,
         CombatCreatureSnapshot snapshot,
-        string restoreContext)
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -860,7 +923,8 @@ public static class SingleplayerCombatStateSnapshotService
             }
 
             creatureNode.GetNodeOrNull<Node>("%HealthBar")?.Call("RefreshValues");
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
 
             MainFile.Logger.Info(
                 $"Synchronized Owl Magistrate flying state during singleplayer combat snapshot restore for {restoreContext}. " +
@@ -1022,7 +1086,11 @@ public static class SingleplayerCombatStateSnapshotService
         };
     }
 
-    private static async Task TrySynchronizeTestSubjectVisualStateAsync(Creature creature, CombatCreatureSnapshot snapshot, string restoreContext)
+    private static async Task TrySynchronizeTestSubjectVisualStateAsync(
+        Creature creature,
+        CombatCreatureSnapshot snapshot,
+        string restoreContext,
+        bool refreshIntentDisplays)
     {
         try
         {
@@ -1053,7 +1121,8 @@ public static class SingleplayerCombatStateSnapshotService
                 animationId,
                 !string.Equals(animationId, TestSubjectDieAnimationId, StringComparison.Ordinal),
                 0);
-            await creatureNode.RefreshIntents();
+            if (refreshIntentDisplays)
+                await creatureNode.RefreshIntents();
 
             MainFile.Logger.Info(
                 $"Synchronized Test Subject visual state during singleplayer combat snapshot restore for {restoreContext}. " +
@@ -1480,17 +1549,30 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    private static async Task RefreshEnemyIntentDisplaysAsync(CombatState? combatState)
+    private static async Task RefreshEnemyIntentDisplaysAsync(ICombatState? combatState)
     {
         var combatRoom = NCombatRoom.Instance;
-        if (combatState == null || combatRoom == null)
+        var mutableCombatState = CombatStateCompatibilityService.GetCombatState(combatState);
+        if (mutableCombatState == null || combatRoom == null)
             return;
 
-        foreach (var enemy in combatState.Creatures.Where(creature => creature.Player == null))
+        foreach (var enemy in mutableCombatState.Creatures.Where(creature => creature.Player == null))
         {
             var creatureNode = combatRoom.GetCreatureNode(enemy);
             if (creatureNode != null)
                 await creatureNode.RefreshIntents();
+        }
+    }
+
+    private static async Task TryRefreshEnemyIntentDisplaysAsync(ICombatState? combatState, string restoreContext)
+    {
+        try
+        {
+            await RefreshEnemyIntentDisplaysAsync(combatState);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to refresh singleplayer enemy intents for {restoreContext}: {e.Message}");
         }
     }
 
@@ -1569,7 +1651,7 @@ public static class SingleplayerCombatStateSnapshotService
         var combat = player.PlayerCombatState!;
         var usedDeckCards = new HashSet<CardModel>();
         foreach (var existingCard in combat.AllPiles.SelectMany(pile => pile.Cards).ToList())
-            existingCard.RemoveFromState();
+            RemoveCardFromRestoreState(existingCard);
 
         foreach (var pileSnapshot in pileSnapshots)
         {
@@ -1635,7 +1717,7 @@ public static class SingleplayerCombatStateSnapshotService
         {
             var card = runState.LoadCard(cardSnapshot.Card, player);
             RegisterCardInCombatState(card);
-            card.DeckVersion = ResolveRemovedDeckVersion(runState, player, cardSnapshot, usedDeckCards);
+            card.DeckVersion = ResolveRemovedDeckVersion(player, cardSnapshot, usedDeckCards);
             ApplyCardSnapshotState(card, cardSnapshot);
             card.RemoveFromState();
             return card;
@@ -1650,7 +1732,6 @@ public static class SingleplayerCombatStateSnapshotService
     }
 
     private static CardModel? ResolveRemovedDeckVersion(
-        RunState runState,
         Player player,
         CombatCardSnapshot cardSnapshot,
         ISet<CardModel> usedDeckCards)
@@ -1663,24 +1744,25 @@ public static class SingleplayerCombatStateSnapshotService
             !usedDeckCards.Contains(deckCard)
             && AreSerializableCardsEquivalent(deckCard.ToSerializable(), desiredDeckCard));
 
-        CardModel deckVersion;
         if (matchingDeckCard != null)
         {
-            deckVersion = matchingDeckCard;
-        }
-        else
-        {
-            deckVersion = runState.LoadCard(desiredDeckCard, player);
+            usedDeckCards.Add(matchingDeckCard);
+            return matchingDeckCard;
         }
 
+        var deckVersion = CreateDetachedDeckVersionCard(desiredDeckCard);
         usedDeckCards.Add(deckVersion);
-        deckVersion.RemoveFromState();
         return deckVersion;
     }
 
     private static bool AreSerializableCardsEquivalent(SerializableCard left, SerializableCard right)
     {
         return JsonSerializer.Serialize(left, JsonOptions) == JsonSerializer.Serialize(right, JsonOptions);
+    }
+
+    private static CardModel CreateDetachedDeckVersionCard(SerializableCard serializableCard)
+    {
+        return CardModel.FromSerializable(serializableCard);
     }
 
     private static void ApplyCardSnapshotState(CardModel card, CombatCardSnapshot cardSnapshot)
@@ -1701,10 +1783,10 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    private static void RestorePlayerOrbs(PlayerCombatState combat, IReadOnlyList<CombatOrbSnapshot> orbSnapshots)
+    private static void RestorePlayerOrbs(Player player, PlayerCombatState combat, IReadOnlyList<CombatOrbSnapshot> orbSnapshots)
     {
         var orbQueue = combat.OrbQueue;
-        var capacity = orbQueue.Capacity;
+        var capacity = Math.Max(orbQueue.Capacity, orbSnapshots.Count);
         orbQueue.Clear();
         orbQueue.AddCapacity(capacity);
 
@@ -1712,7 +1794,102 @@ public static class SingleplayerCombatStateSnapshotService
         {
             var orbSnapshot = orbSnapshots[index];
             var orb = ModelDb.GetById<OrbModel>(orbSnapshot.Id).ToMutable();
+            orb.Owner = player;
+            RestoreOrbSnapshotState(orb, orbSnapshot);
             orbQueue.Insert(index, orb);
+        }
+    }
+
+    private static void SynchronizePlayerOrbManagersForSingleplayerRestore(CombatState combatState, string restoreContext)
+    {
+        foreach (var player in combatState.Players)
+            TrySynchronizePlayerOrbManagerForSingleplayerRestore(player, restoreContext);
+    }
+
+    private static void TrySynchronizePlayerOrbManagerForSingleplayerRestore(Player player, string restoreContext)
+    {
+        var orbQueue = player.PlayerCombatState?.OrbQueue;
+        var orbManager = NCombatRoom.Instance?.GetCreatureNode(player.Creature)?.OrbManager;
+        if (orbQueue == null || orbManager == null)
+            return;
+
+        try
+        {
+            RebuildOrbManagerVisualsFromQueue(orbManager, orbQueue);
+
+            if (orbQueue.Capacity > 0 || orbQueue.Orbs.Count > 0)
+            {
+                MainFile.Logger.Info(
+                    $"Rebuilt singleplayer orb visuals after restore for {restoreContext}. " +
+                    $"Player={player.NetId} Orbs={orbQueue.Orbs.Count}/{orbQueue.Capacity}");
+            }
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to rebuild singleplayer orb visuals after restore for {restoreContext}. " +
+                $"Player={player.NetId}: {e.Message}");
+        }
+    }
+
+    private static void RebuildOrbManagerVisualsFromQueue(NOrbManager orbManager, OrbQueue orbQueue)
+    {
+        if (NOrbManagerOrbContainerField?.GetValue(orbManager) is not Control orbContainer
+            || NOrbManagerOrbsField?.GetValue(orbManager) is not IList orbNodes)
+        {
+            return;
+        }
+
+        if (NOrbManagerCurrentTweenField?.GetValue(orbManager) is Tween currentTween)
+            currentTween.Kill();
+
+        foreach (var orbNode in orbContainer.GetChildren().OfType<NOrb>().ToList())
+            ForceRemoveOrbNodeImmediately(orbNode);
+
+        orbNodes.Clear();
+
+        foreach (var orb in orbQueue.Orbs)
+            AddOrbNodeToManager(orbManager, orbContainer, orbNodes, NOrb.Create(orbManager.IsLocal, orb));
+
+        for (var index = orbQueue.Orbs.Count; index < orbQueue.Capacity; index++)
+            AddOrbNodeToManager(orbManager, orbContainer, orbNodes, NOrb.Create(orbManager.IsLocal));
+
+        NOrbManagerTweenLayoutMethod?.Invoke(orbManager, []);
+        NOrbManagerUpdateControllerNavigationMethod?.Invoke(orbManager, []);
+        orbManager.UpdateVisuals(OrbEvokeType.None);
+    }
+
+    private static void AddOrbNodeToManager(NOrbManager orbManager, Control orbContainer, IList orbNodes, NOrb orbNode)
+    {
+        orbContainer.AddChild(orbNode);
+        orbNodes.Add(orbNode);
+        orbNode.Position = Vector2.Zero;
+    }
+
+    private static void ForceRemoveOrbNodeImmediately(NOrb orbNode)
+    {
+        try
+        {
+            orbNode.Visible = false;
+            orbNode.GetParent()?.RemoveChild(orbNode);
+            orbNode.QueueFree();
+        }
+        catch
+        {
+            // Best-effort cleanup only.
+        }
+    }
+
+    private static void RestoreOrbSnapshotState(OrbModel orb, CombatOrbSnapshot orbSnapshot)
+    {
+        switch (orb)
+        {
+            case DarkOrb:
+                DarkOrbEvokeValueField?.SetValue(orb, (decimal)orbSnapshot.Evoke);
+                break;
+            case GlassOrb:
+                GlassOrbPassiveValueField?.SetValue(orb, (decimal)orbSnapshot.Passive);
+                break;
         }
     }
 
@@ -1736,12 +1913,7 @@ public static class SingleplayerCombatStateSnapshotService
             if (snapshot.PlayersReadyToBeginEnemyTurnField != null)
                 TryRestoreField(combatManager, snapshot.PlayersReadyToBeginEnemyTurnField, "combat manager players-ready-to-begin-enemy-turn");
 
-            TryRestoreBooleanMember(
-                combatManager,
-                CombatManagerIsPlayPhaseProperty,
-                CombatManagerIsPlayPhaseField,
-                snapshot.IsPlayPhase,
-                "combat manager IsPlayPhase");
+            CombatStateCompatibilityService.RestorePlayPhaseIfNeeded(combatManager, snapshot.IsPlayPhase);
             TryRestoreBooleanMember(
                 combatManager,
                 CombatManagerIsEnemyTurnStartedProperty,
@@ -1764,7 +1936,8 @@ public static class SingleplayerCombatStateSnapshotService
             MainFile.Logger.Info(
                 $"Restored singleplayer combat manager runtime state for {restoreContext}. " +
                 $"playerActionsDisabled={CombatManager.Instance.PlayerActionsDisabled} " +
-                $"isPlayPhase={CombatManager.Instance.IsPlayPhase} " +
+                $"isPlayPhase={CombatStateCompatibilityService.IsPlayPhase(CombatStateCompatibilityService.GetCurrentCombatState())} " +
+                $"phase={CombatStateCompatibilityService.DescribePlayerTurnPhases(CombatStateCompatibilityService.GetCurrentCombatState())} " +
                 $"isEnemyTurnStarted={CombatManager.Instance.IsEnemyTurnStarted} " +
                 $"endingPhaseOne={CombatManager.Instance.EndingPlayerTurnPhaseOne} " +
                 $"endingPhaseTwo={CombatManager.Instance.EndingPlayerTurnPhaseTwo} " +
@@ -1920,7 +2093,8 @@ public static class SingleplayerCombatStateSnapshotService
                 await TrySynchronizeSpecialMonsterStateAsync(
                     resolvedSnapshot.Creature,
                     resolvedSnapshot.Snapshot,
-                    $"{restoreContext}/tough-egg-node-resync");
+                    $"{restoreContext}/tough-egg-node-resync",
+                    refreshIntentDisplays: true);
                 continue;
             }
 
@@ -2010,7 +2184,9 @@ public static class SingleplayerCombatStateSnapshotService
     {
         try
         {
+            ClearTransientLocalCombatCardUi();
             RebuildLocalHandUi(runState);
+            RefreshLocalCombatPileUi(runState);
             RefreshCombatUiState(combatState);
             ShowPlayerTurnBannerIfNeeded(roundNumber);
         }
@@ -2071,6 +2247,113 @@ public static class SingleplayerCombatStateSnapshotService
         handUi.ForceRefreshCardIndices();
     }
 
+    private static void ClearTransientLocalCombatCardUi()
+    {
+        var combatUi = NCombatRoom.Instance?.Ui;
+        if (combatUi == null)
+            return;
+
+        ClearPlayQueueUi(combatUi.PlayQueue);
+        ClearTransientCardNodes(combatUi.PlayContainer);
+        ClearTransientCardNodes(NCombatRoom.Instance?.CombatVfxContainer);
+        ClearTransientCardNodes(NRun.Instance?.GlobalUi?.TopBar?.TrailContainer);
+    }
+
+    private static void ClearPlayQueueUi(NCardPlayQueue? playQueue)
+    {
+        if (playQueue == null)
+            return;
+
+        try
+        {
+            if (NCardPlayQueueItemsField?.GetValue(playQueue) is IList queueItems)
+            {
+                foreach (var queueItem in queueItems.Cast<object>().ToList())
+                {
+                    if (NCardPlayQueueItemCurrentTweenField?.GetValue(queueItem) is Tween tween)
+                        tween.Kill();
+
+                    if (NCardPlayQueueItemCardField?.GetValue(queueItem) is NCard cardNode)
+                        ForceRemoveCardNodeImmediately(cardNode);
+                }
+
+                queueItems.Clear();
+            }
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to clear stale play-queue cards during singleplayer combat UI refresh: {e.Message}");
+        }
+
+        foreach (var cardNode in playQueue.GetChildren().OfType<NCard>().ToList())
+            ForceRemoveCardNodeImmediately(cardNode);
+    }
+
+    private static void ClearTransientCardNodes(Node? container)
+    {
+        if (container == null)
+            return;
+
+        foreach (var cardNode in container.GetChildren().OfType<NCard>().ToList())
+            ForceRemoveCardNodeImmediately(cardNode);
+    }
+
+    private static void RefreshLocalCombatPileUi(RunState runState)
+    {
+        var combatUi = NCombatRoom.Instance?.Ui;
+        var localPlayer = LocalContext.GetMe(runState);
+        if (combatUi == null || localPlayer?.PlayerCombatState == null)
+            return;
+
+        SyncCombatPileButtonState(combatUi.DrawPile, CardPile.Get(PileType.Draw, localPlayer));
+        SyncCombatPileButtonState(combatUi.DiscardPile, CardPile.Get(PileType.Discard, localPlayer));
+        SyncCombatPileButtonState(combatUi.ExhaustPile, CardPile.Get(PileType.Exhaust, localPlayer));
+    }
+
+    private static void SyncCombatPileButtonState(NCombatCardPile? pileButton, CardPile? pile)
+    {
+        if (pileButton == null || pile == null)
+            return;
+
+        var count = pile.Cards.Count;
+        CombatCardPileCurrentCountField?.SetValue(pileButton, count);
+
+        if (CombatCardPileCountLabelField?.GetValue(pileButton) is Control countLabel)
+        {
+            countLabel.GetType()
+                .GetMethod("SetTextAutoSize", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, [typeof(string)])
+                ?.Invoke(countLabel, [count.ToString()]);
+            countLabel.PivotOffset = countLabel.Size * 0.5f;
+        }
+
+        if (pileButton is not NExhaustPileButton exhaustPileButton)
+            return;
+
+        if (count > 0)
+        {
+            exhaustPileButton.Visible = true;
+            exhaustPileButton.Enable();
+            return;
+        }
+
+        exhaustPileButton.Visible = false;
+        exhaustPileButton.Disable();
+    }
+
+    private static void ForceRemoveCardNodeImmediately(NCard node)
+    {
+        try
+        {
+            node.Visible = false;
+            node.GetParent()?.RemoveChild(node);
+            node.QueueFree();
+        }
+        catch
+        {
+            // Best-effort cleanup only. The normal UI cleanup path has already run.
+        }
+    }
+
     private static void RefreshCombatUiState(CombatState combatState)
     {
         var handUi = NPlayerHand.Instance;
@@ -2104,6 +2387,49 @@ public static class SingleplayerCombatStateSnapshotService
     private static void RegisterCardInCombatState(CardModel card)
     {
         CombatStateAddCardMethod?.Invoke(CombatStateCompatibilityService.GetRawCombatState(card.Owner?.Creature), [card]);
+    }
+
+    private static void RemoveCardFromRestoreState(CardModel card)
+    {
+        var combatState = CombatStateCompatibilityService.GetCombatState(card);
+        var runState = card.RunState;
+
+        try
+        {
+            card.RemoveFromCurrentPile(true);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to remove combat card from pile during singleplayer combat snapshot restore cleanup. " +
+                $"Card={card.Id.Entry}, Owner={card.Owner?.NetId.ToString() ?? "unknown"}: {e.Message}");
+        }
+
+        card.HasBeenRemovedFromState = true;
+
+        try
+        {
+            if (combatState?.ContainsCard(card) == true)
+                combatState.RemoveCard(card);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to remove combat card from CombatState during singleplayer combat snapshot restore cleanup. " +
+                $"Card={card.Id.Entry}, Owner={card.Owner?.NetId.ToString() ?? "unknown"}: {e.Message}");
+        }
+
+        try
+        {
+            if (runState?.ContainsCard(card) == true)
+                runState.RemoveCard(card);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn(
+                $"Failed to remove combat card from RunState during singleplayer combat snapshot restore cleanup. " +
+                $"Card={card.Id.Entry}, Owner={card.Owner?.NetId.ToString() ?? "unknown"}: {e.Message}");
+        }
     }
 
     private static bool? GetHandCanPlayCardsState()
@@ -2431,8 +2757,7 @@ public static class SingleplayerCombatStateSnapshotService
                 PlayerActionsDisabledField = CaptureField(combatManager, CombatManagerPlayerActionsDisabledField),
                 PlayersReadyToEndTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToEndTurnField),
                 PlayersReadyToBeginEnemyTurnField = CaptureField(combatManager, CombatManagerPlayersReadyToBeginEnemyTurnField),
-                IsPlayPhase = TryReadBoolProperty(CombatManagerIsPlayPhaseProperty, combatManager)
-                    ?? TryReadNullableBoolField(CombatManagerIsPlayPhaseField, combatManager),
+                IsPlayPhase = CombatStateCompatibilityService.IsPlayPhase(CombatStateCompatibilityService.GetCurrentCombatState()),
                 IsEnemyTurnStarted = TryReadBoolProperty(CombatManagerIsEnemyTurnStartedProperty, combatManager)
                     ?? TryReadNullableBoolField(CombatManagerIsEnemyTurnStartedField, combatManager),
                 EndingPlayerTurnPhaseOne = TryReadBoolProperty(CombatManagerEndingPlayerTurnPhaseOneProperty, combatManager)

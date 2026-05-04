@@ -236,7 +236,7 @@ public static class SingleplayerPreviousStepReplayService
     {
         return combatState.CurrentSide == MegaCrit.Sts2.Core.Combat.CombatSide.Player
                && CombatManager.Instance.IsInProgress
-               && CombatManager.Instance.IsPlayPhase
+               && CombatStateCompatibilityService.IsPlayPhase(combatState)
                && !CombatManager.Instance.EndingPlayerTurnPhaseOne
                && !CombatManager.Instance.EndingPlayerTurnPhaseTwo
                && !CombatManager.Instance.PlayerActionsDisabled
@@ -607,7 +607,7 @@ public static class SingleplayerPreviousStepReplayService
                && combatState.RoundNumber == targetRound
                && combatState.CurrentSide == MegaCrit.Sts2.Core.Combat.CombatSide.Player
                && CombatManager.Instance.IsInProgress
-               && CombatManager.Instance.IsPlayPhase
+               && CombatStateCompatibilityService.IsPlayPhase(combatState)
                && !CombatManager.Instance.EndingPlayerTurnPhaseOne
                && !CombatManager.Instance.EndingPlayerTurnPhaseTwo
                && !RunManager.Instance.ActionExecutor.IsPaused
@@ -654,7 +654,8 @@ public static class SingleplayerPreviousStepReplayService
 
             MainFile.Logger.Info(
                 $"[prev-step:{label}] round={combatState.RoundNumber} side={combatState.CurrentSide} " +
-                $"playPhase={CombatManager.Instance.IsPlayPhase} paused={RunManager.Instance.ActionExecutor.IsPaused} " +
+                $"playPhase={CombatStateCompatibilityService.IsPlayPhase(combatState)} " +
+                $"phase={CombatStateCompatibilityService.DescribePlayerTurnPhases(combatState)} paused={RunManager.Instance.ActionExecutor.IsPaused} " +
                 $"syncState={RunManager.Instance.ActionQueueSynchronizer.CombatState} netType={netType} netImpl={netServiceImpl} isSinglePlayer={isSinglePlayer} " +
                 $"playerActionsDisabled={CombatManager.Instance.PlayerActionsDisabled} " +
                 $"handDisabled={(handDisabled.HasValue ? handDisabled.Value : false)} handCanPlayCards={(handCanPlayCards.HasValue ? handCanPlayCards.Value : false)} " +

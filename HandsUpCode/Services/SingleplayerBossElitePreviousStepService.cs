@@ -88,7 +88,8 @@ public static class SingleplayerBossElitePreviousStepService
             $"encounter={DescribeEncounter(combatRoom)} " +
             $"round={(combatState?.RoundNumber.ToString() ?? "unknown")} " +
             $"currentSide={(combatState?.CurrentSide.ToString() ?? "unknown")} " +
-            $"isPlayPhase={(combatManager?.IsPlayPhase.ToString() ?? "unknown")} " +
+            $"isPlayPhase={CombatStateCompatibilityService.IsPlayPhase(combatState)} " +
+            $"phase={CombatStateCompatibilityService.DescribePlayerTurnPhases(combatState)} " +
             $"playerActionsDisabled={(combatManager?.PlayerActionsDisabled.ToString() ?? "unknown")} " +
             $"monsters={DescribeMonsters(combatRoom)}");
     }
