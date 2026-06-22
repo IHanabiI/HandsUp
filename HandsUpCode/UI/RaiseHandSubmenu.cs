@@ -28,7 +28,13 @@ namespace HandsUp.HandsUpCode.UI;
 
 public partial class RaiseHandSubmenu : NSubmenu
 {
-    private static readonly RaiseHandActionKind[] ActionKinds = RaiseHandActionService.OrderedActionKinds.ToArray();
+    private static readonly RaiseHandActionKind[] MenuActionKinds =
+    [
+        RaiseHandActionKind.SoftRestart,
+        RaiseHandActionKind.PreviousStep,
+        RaiseHandActionKind.PreviousFloor,
+        RaiseHandActionKind.Restart
+    ];
 
     private const string RestartLabel = "\u4ece\u5934\u518d\u6765";
     private const string SoftRestartLabel = "\u8fd9\u6b21\u4e0d\u7b97";
@@ -46,6 +52,7 @@ public partial class RaiseHandSubmenu : NSubmenu
     private readonly VBoxContainer _buttonContainer = new();
     private readonly Label _description = new();
     private readonly Label _status = new();
+    private bool _statusAddedToRoot;
 
     private readonly List<NPauseMenuButton> _actionButtons = [];
     private NPauseMenuButton? _templateButton;
@@ -95,14 +102,7 @@ public partial class RaiseHandSubmenu : NSubmenu
         _buttonContainer.CustomMinimumSize = new Vector2(720f, 360f);
         _root.AddChild(_buttonContainer);
 
-        _status.Text = PlaceholderStatus;
-        _status.HorizontalAlignment = HorizontalAlignment.Center;
-        _status.AutowrapMode = TextServer.AutowrapMode.WordSmart;
-        _status.AddThemeColorOverride("font_color", StsColors.gray);
-        _status.AddThemeFontSizeOverride("font_size", 18);
-        _status.CustomMinimumSize = new Vector2(920f, 60f);
-        _root.AddChild(_status);
-
+        ConfigureStatusLabel();
         ConnectSignals();
     }
 
@@ -119,6 +119,8 @@ public partial class RaiseHandSubmenu : NSubmenu
 
         if (_actionButtons.Count == 0)
             BuildButtons();
+
+        RefreshStatusVisibility();
     }
 
     private void BuildButtons()
@@ -129,12 +131,15 @@ public partial class RaiseHandSubmenu : NSubmenu
         var duplicateFlags =
             (int)(Node.DuplicateFlags.Groups | Node.DuplicateFlags.Scripts | Node.DuplicateFlags.UseInstantiation);
 
-        foreach (var actionKind in ActionKinds)
+        foreach (var actionKind in MenuActionKinds)
         {
             var label = RaiseHandActionService.GetActionLabel(actionKind);
             var button = (NPauseMenuButton)_templateButton.Duplicate(duplicateFlags);
             button.Name = $"{actionKind}Button";
             button.GetNodeOrNull<Label>("Label")?.Set("text", label);
+            if (actionKind == RaiseHandActionKind.Restart)
+                AddRestartButtonSpacer();
+
             button.Connect(NClickableControl.SignalName.Released, Callable.From<NButton>(_ => OnActionPressed(actionKind)));
             _buttonContainer.AddChild(button);
             _actionButtons.Add(button);
@@ -150,12 +155,48 @@ public partial class RaiseHandSubmenu : NSubmenu
         }
     }
 
+    private void AddRestartButtonSpacer()
+    {
+        _buttonContainer.AddChild(new Control
+        {
+            Name = "RestartDangerSpacer",
+            CustomMinimumSize = new Vector2(0f, 10f),
+            MouseFilter = MouseFilterEnum.Ignore,
+            FocusMode = FocusModeEnum.None
+        });
+    }
+
+    private void ConfigureStatusLabel()
+    {
+        _status.Text = string.Empty;
+        _status.HorizontalAlignment = HorizontalAlignment.Center;
+        _status.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        _status.AddThemeColorOverride("font_color", StsColors.gray);
+        _status.AddThemeFontSizeOverride("font_size", 18);
+        _status.CustomMinimumSize = new Vector2(920f, 60f);
+        _status.Visible = false;
+    }
+
+    private void RefreshStatusVisibility()
+    {
+        var shouldShowStatus = MultiplayerApprovalService.IsMultiplayerActive();
+        if (shouldShowStatus && !_statusAddedToRoot)
+        {
+            _root.AddChild(_status);
+            _statusAddedToRoot = true;
+        }
+
+        if (GodotObject.IsInstanceValid(_status))
+            _status.Visible = shouldShowStatus;
+    }
+
     private void SetStatusText(string text)
     {
         if (!GodotObject.IsInstanceValid(this) || !GodotObject.IsInstanceValid(_status))
             return;
 
         _status.Text = text;
+        RefreshStatusVisibility();
     }
 
     private void OnActionPressed(RaiseHandActionKind actionKind)

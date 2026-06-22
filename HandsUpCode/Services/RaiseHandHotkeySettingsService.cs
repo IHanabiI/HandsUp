@@ -23,6 +23,8 @@ public static class RaiseHandHotkeySettingsService
     private static int _loadedProfileId = -1;
     private static RaiseHandHotkeySettingsData _settings = CreateDefaultSettings();
 
+    public static event Action? SettingsChanged;
+
     public static bool ShouldShowShortcutConfirmPopup()
     {
         EnsureLoaded();
@@ -37,6 +39,7 @@ public static class RaiseHandHotkeySettingsService
 
         _settings.ShowShortcutConfirmPopup = value;
         Save();
+        NotifySettingsChanged(refreshInputMap: false);
     }
 
     public static Key GetBinding(RaiseHandActionKind actionKind)
@@ -68,8 +71,7 @@ public static class RaiseHandHotkeySettingsService
 
         SetBindingCore(actionKind, key);
         Save();
-        RaiseHandHotkeyInputMapService.RefreshBindings();
-        RaiseHandHotkeyRuntimeService.EnsureRegistered();
+        NotifySettingsChanged();
     }
 
     public static void ClearBinding(RaiseHandActionKind actionKind)
@@ -77,8 +79,7 @@ public static class RaiseHandHotkeySettingsService
         EnsureLoaded();
         SetBindingCore(actionKind, Key.None);
         Save();
-        RaiseHandHotkeyInputMapService.RefreshBindings();
-        RaiseHandHotkeyRuntimeService.EnsureRegistered();
+        NotifySettingsChanged();
     }
 
     public static void ResetToDefaults()
@@ -86,8 +87,7 @@ public static class RaiseHandHotkeySettingsService
         EnsureLoaded();
         _settings = CreateDefaultSettings();
         Save();
-        RaiseHandHotkeyInputMapService.RefreshBindings();
-        RaiseHandHotkeyRuntimeService.EnsureRegistered();
+        NotifySettingsChanged();
     }
 
     public static bool TryGetActionForKey(Key key, out RaiseHandActionKind actionKind)
@@ -172,6 +172,17 @@ public static class RaiseHandHotkeySettingsService
         {
             MainFile.Logger.Error($"Failed to save HandsUp hotkey settings: {e}");
         }
+    }
+
+    private static void NotifySettingsChanged(bool refreshInputMap = true)
+    {
+        if (refreshInputMap)
+        {
+            RaiseHandHotkeyInputMapService.RefreshBindings();
+            RaiseHandHotkeyRuntimeService.EnsureRegistered();
+        }
+
+        SettingsChanged?.Invoke();
     }
 
     private static void WriteToPath(string path, RaiseHandHotkeySettingsData settings)

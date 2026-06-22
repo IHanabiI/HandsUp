@@ -55,6 +55,7 @@ public partial class RaiseHandHotkeySettingsPanel : NSettingsPanel
         RefreshPanelSize();
         RewireFocus();
 
+        RaiseHandHotkeySettingsService.SettingsChanged += OnSettingsChanged;
         Connect(CanvasItem.SignalName.VisibilityChanged, Callable.From(OnPanelVisibilityChanged));
         GetViewport().Connect(Viewport.SignalName.SizeChanged, Callable.From(RefreshPanelSize));
     }
@@ -66,6 +67,7 @@ public partial class RaiseHandHotkeySettingsPanel : NSettingsPanel
         if (viewport != null)
             viewport.Disconnect(Viewport.SignalName.SizeChanged, Callable.From(RefreshPanelSize));
 
+        RaiseHandHotkeySettingsService.SettingsChanged -= OnSettingsChanged;
         Disconnect(CanvasItem.SignalName.VisibilityChanged, Callable.From(OnPanelVisibilityChanged));
     }
 
@@ -467,12 +469,21 @@ public partial class RaiseHandHotkeySettingsPanel : NSettingsPanel
             return;
         }
 
+        RefreshAll();
         _visibilityTween?.Kill();
         Modulate = StsColors.transparentBlack;
         _visibilityTween = CreateTween().SetParallel(true);
         _visibilityTween.TweenProperty(this, "modulate", Colors.White, 0.5f)
             .SetEase(Tween.EaseType.Out)
             .SetTrans(Tween.TransitionType.Cubic);
+    }
+
+    private void OnSettingsChanged()
+    {
+        if (_listeningAction != null)
+            return;
+
+        RefreshAll();
     }
 
     private static void SetMouseFilterRecursive(Node node, MouseFilterEnum mouseFilter)

@@ -1,5 +1,7 @@
 using Godot;
 using HarmonyLib;
+using BaseLib.Config;
+using HandsUp.HandsUpCode.Config;
 using MegaCrit.Sts2.Core.Modding;
 using HandsUp.HandsUpCode.Services;
 
@@ -18,6 +20,7 @@ public partial class MainFile : Node
         Harmony harmony = new(ModId);
 
         var saveSyncSummary = SaveSyncService.SyncBaseSavesToModded();
+        ModConfigRegistry.Register(ModId, new HandsUpModConfig());
         MultiplayerApprovalService.RegisterActionExecutor(MultiplayerExecutionService.ExecuteApprovedActionAsync);
         harmony.PatchAll();
         Logger.Info("HandsUp initialized.");
