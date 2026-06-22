@@ -10,6 +10,8 @@ using MegaCrit.Sts2.Core.Animation;
 using MegaCrit.Sts2.Core.Bindings.MegaSpine;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Combat.History;
+using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -37,6 +39,7 @@ using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Saves.Runs;
+using MegaCrit.Sts2.Core.ValueProps;
 
 namespace HandsUp.HandsUpCode.Services;
 
@@ -109,8 +112,12 @@ public static class SingleplayerCombatStateSnapshotService
         .GetMethod("UpdateCreaturePositions", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? SurroundedPowerFaceDirectionMethod = typeof(SurroundedPower)
         .GetMethod("FaceDirection", BindingFlags.Instance | BindingFlags.NonPublic);
-    private static readonly MethodInfo? DoormakerUpdateVisualMethod = typeof(Doormaker)
+    private static readonly MethodInfo? DoormakerUpdateVisualMethod = typeof(Architect)
         .GetMethod("UpdateVisual", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly PropertyInfo? CombatHistoryEntryRoundNumberProperty = typeof(CombatHistoryEntry)
+        .GetProperty("RoundNumber", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly PropertyInfo? CombatHistoryEntryCurrentSideProperty = typeof(CombatHistoryEntry)
+        .GetProperty("CurrentSide", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
     private static readonly FieldInfo? NCreatureSpineAnimatorField = typeof(NCreature)
         .GetField("_spineAnimator", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? CreatureAnimatorCurrentStateField = typeof(CreatureAnimator)
@@ -166,6 +173,16 @@ public static class SingleplayerCombatStateSnapshotService
         .GetField("_evokeVal", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? GlassOrbPassiveValueField = typeof(GlassOrb)
         .GetField("_passiveVal", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? CombatHistoryEntriesField = typeof(CombatHistory)
+        .GetField("_entries", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? CombatHistoryChangedField = typeof(CombatHistory)
+        .GetField("Changed", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? CardPlayFinishedWasEtherealField = typeof(CardPlayFinishedEntry)
+        .GetField("<WasEthereal>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? PowerModelOwnerField = typeof(PowerModel)
+        .GetField("_owner", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? PowerModelAmountField = typeof(PowerModel)
+        .GetField("_amount", BindingFlags.Instance | BindingFlags.NonPublic);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -242,6 +259,7 @@ public static class SingleplayerCombatStateSnapshotService
         await TryRefreshEnemyIntentDisplaysAsync(combatState, restoreContext);
         RestoreHiddenLiveAllyVisuals(combatState, restoreContext);
         SynchronizePlayerOrbManagersForSingleplayerRestore(combatState, restoreContext);
+        RestoreCombatHistory(runState, combatState, snapshot, restoreContext);
 
         foreach (var player in combatState.Players)
             player.PlayerCombatState?.RecalculateCardValues();
@@ -627,7 +645,7 @@ public static class SingleplayerCombatStateSnapshotService
             return;
         }
 
-        if (creature?.Monster is Doormaker doormaker)
+        if (creature?.Monster is Architect doormaker)
         {
             await TrySynchronizeDoormakerVisualStateAsync(creature, doormaker, snapshot, restoreContext, refreshIntentDisplays);
             return;
@@ -795,7 +813,7 @@ public static class SingleplayerCombatStateSnapshotService
 
     private static async Task TrySynchronizeDoormakerVisualStateAsync(
         Creature creature,
-        Doormaker doormaker,
+        Architect doormaker,
         CombatCreatureSnapshot snapshot,
         string restoreContext,
         bool refreshIntentDisplays)
@@ -813,9 +831,7 @@ public static class SingleplayerCombatStateSnapshotService
 
             var isPortalOpen = TryReadSpecialFieldBool(snapshot.SpecialFields, "_isPortalOpen", out var restoredPortalOpen)
                 ? restoredPortalOpen
-                : ResolveDoormakerPortalOpenFallback(creature, snapshot);
-
-            creature.ShowsInfiniteHp = !isPortalOpen;
+                : ResolveDoormakerPortalOpenFallback(snapshot);
 
             if (isPortalOpen)
             {
@@ -841,11 +857,7 @@ public static class SingleplayerCombatStateSnapshotService
 
             MainFile.Logger.Info(
                 $"Synchronized Doormaker phase state during singleplayer combat snapshot restore for {restoreContext}. " +
-                $"Move={snapshot.CurrentMoveStateId ?? "unknown"} PortalOpen={isPortalOpen} " +
-                $"Hunger={(creature.GetPower<HungerPower>() != null)} " +
-                $"Scrutiny={(creature.GetPower<ScrutinyPower>() != null)} " +
-                $"Grasp={(creature.GetPower<GraspPower>() != null)} " +
-                $"InfiniteHp={creature.ShowsInfiniteHp}");
+                $"Move={snapshot.CurrentMoveStateId ?? "unknown"} PortalOpen={isPortalOpen}");
         }
         catch (Exception e)
         {
@@ -855,35 +867,25 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
-    private static bool ResolveDoormakerPortalOpenFallback(Creature creature, CombatCreatureSnapshot snapshot)
+    private static bool ResolveDoormakerPortalOpenFallback(CombatCreatureSnapshot snapshot)
     {
-        if (creature.GetPower<HungerPower>() != null
-            || creature.GetPower<ScrutinyPower>() != null
-            || creature.GetPower<GraspPower>() != null)
-        {
-            return true;
-        }
-
         return !string.IsNullOrWhiteSpace(snapshot.CurrentMoveStateId)
             && !string.Equals(snapshot.CurrentMoveStateId, DoormakerDramaticOpenMoveId, StringComparison.Ordinal);
     }
 
     private static string? ResolveDoormakerVisualPath(Creature creature, CombatCreatureSnapshot snapshot)
     {
-        if (creature.GetPower<GraspPower>() != null
-            || string.Equals(snapshot.CurrentMoveStateId, DoormakerGraspMoveId, StringComparison.Ordinal))
+        if (string.Equals(snapshot.CurrentMoveStateId, DoormakerGraspMoveId, StringComparison.Ordinal))
         {
             return DoormakerHandsVisualPath;
         }
 
-        if (creature.GetPower<ScrutinyPower>() != null
-            || string.Equals(snapshot.CurrentMoveStateId, DoormakerScrutinyMoveId, StringComparison.Ordinal))
+        if (string.Equals(snapshot.CurrentMoveStateId, DoormakerScrutinyMoveId, StringComparison.Ordinal))
         {
             return DoormakerFaceVisualPath;
         }
 
-        if (creature.GetPower<HungerPower>() != null
-            || string.Equals(snapshot.CurrentMoveStateId, DoormakerHungerMoveId, StringComparison.Ordinal))
+        if (string.Equals(snapshot.CurrentMoveStateId, DoormakerHungerMoveId, StringComparison.Ordinal))
         {
             return DoormakerTeethVisualPath;
         }
@@ -1661,7 +1663,11 @@ public static class SingleplayerCombatStateSnapshotService
 
             foreach (var cardSnapshot in pileSnapshot.Cards)
             {
-                var card = runState.LoadCard(cardSnapshot.Card, player);
+                var loadableCard = SingleplayerSerializableCardStateService.ResolveCardForRestore(
+                    cardSnapshot.Card,
+                    player,
+                    cardSnapshot.DeckVersionCard);
+                var card = runState.LoadCard(loadableCard, player);
                 RegisterCardInCombatState(card);
                 card.DeckVersion = ResolveDeckVersion(runState, player, cardSnapshot, usedDeckCards);
                 ApplyCardSnapshotState(card, cardSnapshot);
@@ -1683,7 +1689,7 @@ public static class SingleplayerCombatStateSnapshotService
         var desiredDeckCard = cardSnapshot.DeckVersionCard ?? cardSnapshot.Card;
         var matchingDeckCard = player.Deck.Cards.FirstOrDefault(deckCard =>
             !usedDeckCards.Contains(deckCard)
-            && AreSerializableCardsEquivalent(deckCard.ToSerializable(), desiredDeckCard));
+            && SingleplayerSerializableCardStateService.MatchesDeckCardForRestore(deckCard.ToSerializable(), desiredDeckCard));
         if (matchingDeckCard != null)
         {
             usedDeckCards.Add(matchingDeckCard);
@@ -1692,7 +1698,10 @@ public static class SingleplayerCombatStateSnapshotService
 
         try
         {
-            var recreatedDeckCard = runState.LoadCard(desiredDeckCard, player);
+            var restoredDeckCard = SingleplayerSerializableCardStateService.ResolveCardForRestore(
+                desiredDeckCard,
+                player);
+            var recreatedDeckCard = runState.LoadCard(restoredDeckCard, player);
             player.Deck.AddInternal(recreatedDeckCard, -1, false);
             usedDeckCards.Add(recreatedDeckCard);
             return recreatedDeckCard;
@@ -1715,9 +1724,14 @@ public static class SingleplayerCombatStateSnapshotService
     {
         try
         {
-            var card = runState.LoadCard(cardSnapshot.Card, player);
+            var deckVersion = ResolveRemovedDeckVersion(player, cardSnapshot, usedDeckCards);
+            var loadableCard = SingleplayerSerializableCardStateService.ResolveCardForRestore(
+                cardSnapshot.Card,
+                player,
+                deckVersion?.ToSerializable() ?? cardSnapshot.DeckVersionCard);
+            var card = runState.LoadCard(loadableCard, player);
             RegisterCardInCombatState(card);
-            card.DeckVersion = ResolveRemovedDeckVersion(player, cardSnapshot, usedDeckCards);
+            card.DeckVersion = deckVersion;
             ApplyCardSnapshotState(card, cardSnapshot);
             card.RemoveFromState();
             return card;
@@ -1742,7 +1756,7 @@ public static class SingleplayerCombatStateSnapshotService
         var desiredDeckCard = cardSnapshot.DeckVersionCard ?? cardSnapshot.Card;
         var matchingDeckCard = player.Deck.Cards.FirstOrDefault(deckCard =>
             !usedDeckCards.Contains(deckCard)
-            && AreSerializableCardsEquivalent(deckCard.ToSerializable(), desiredDeckCard));
+            && SingleplayerSerializableCardStateService.MatchesDeckCardForRestore(deckCard.ToSerializable(), desiredDeckCard));
 
         if (matchingDeckCard != null)
         {
@@ -1750,7 +1764,10 @@ public static class SingleplayerCombatStateSnapshotService
             return matchingDeckCard;
         }
 
-        var deckVersion = CreateDetachedDeckVersionCard(desiredDeckCard);
+        var restoredDeckCard = SingleplayerSerializableCardStateService.ResolveCardForRestore(
+            desiredDeckCard,
+            player);
+        var deckVersion = CreateDetachedDeckVersionCard(restoredDeckCard);
         usedDeckCards.Add(deckVersion);
         return deckVersion;
     }
@@ -1773,14 +1790,160 @@ public static class SingleplayerCombatStateSnapshotService
             card.AfflictInternal(affliction, cardSnapshot.AfflictionCount);
         }
 
-        if (cardSnapshot.Keywords == null)
+        if (cardSnapshot.Keywords != null)
+        {
+            foreach (var keyword in cardSnapshot.Keywords)
+            {
+                if (!card.Keywords.Contains(keyword))
+                    card.AddKeyword(keyword);
+            }
+        }
+
+        RestoreCardSpecialFields(card, cardSnapshot);
+    }
+
+    private static void RestoreCardSpecialFields(CardModel card, CombatCardSnapshot cardSnapshot)
+    {
+        if (cardSnapshot.SpecialFields.Count == 0)
             return;
 
-        foreach (var keyword in cardSnapshot.Keywords)
+        foreach (var fieldSnapshot in cardSnapshot.SpecialFields)
+            TryRestoreField(card, fieldSnapshot, $"card {card.Id.Entry}");
+
+        TryInvokeCardAfterDowngraded(card);
+    }
+
+    private static void TryInvokeCardAfterDowngraded(CardModel card)
+    {
+        try
         {
-            if (!card.Keywords.Contains(keyword))
-                card.AddKeyword(keyword);
+            var afterDowngraded = card.GetType().GetMethod("AfterDowngraded", BindingFlags.Instance | BindingFlags.NonPublic);
+            afterDowngraded?.Invoke(card, null);
         }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to refresh runtime card values after restoring special fields for {card.Id.Entry}: {e.Message}");
+        }
+    }
+
+    private static List<SpecialFieldSnapshot> CaptureSpecialCardFields(CardModel? card)
+    {
+        if (!SingleplayerPreviousStepSpecialSnapshotRegistry.TryGetCardPrivateFields(card, out var fieldNames)
+            || card == null)
+        {
+            return [];
+        }
+
+        return CaptureFields(card, fieldNames);
+    }
+
+    private static CombatLiveCardReferenceSnapshot? CaptureLiveCardReference(CardModel? card)
+    {
+        if (card?.Owner == null)
+            return null;
+
+        var pile = card.Pile;
+        var cardIndex = -1;
+        if (pile != null)
+        {
+            for (var index = 0; index < pile.Cards.Count; index++)
+            {
+                if (!ReferenceEquals(pile.Cards[index], card))
+                    continue;
+
+                cardIndex = index;
+                break;
+            }
+        }
+
+        return new CombatLiveCardReferenceSnapshot
+        {
+            PlayerId = card.Owner.NetId,
+            PileType = pile?.Type ?? PileType.None,
+            CardIndex = cardIndex,
+            Card = CombatCardSnapshot.FromCard(card)
+        };
+    }
+
+    private static CardModel? ResolveLiveCardReference(
+        RunState runState,
+        CombatState combatState,
+        CombatLiveCardReferenceSnapshot? reference,
+        Dictionary<ulong, ISet<CardModel>>? usedDeckCardsByPlayer = null)
+    {
+        if (reference == null)
+            return null;
+
+        var player = combatState.RunState?.GetPlayer(reference.PlayerId);
+        if (player == null)
+            return null;
+
+        var pile = CardPile.Get(reference.PileType, player);
+        if (pile != null)
+        {
+            if (reference.CardIndex >= 0 && reference.CardIndex < pile.Cards.Count)
+            {
+                var indexedCard = pile.Cards[reference.CardIndex];
+                if (DoesCardMatchReference(indexedCard, reference))
+                    return indexedCard;
+            }
+
+            var matchingCard = pile.Cards.FirstOrDefault(card => DoesCardMatchReference(card, reference));
+            if (matchingCard != null)
+                return matchingCard;
+        }
+
+        var combatCard = player.PlayerCombatState?.AllPiles
+            .SelectMany(currentPile => currentPile.Cards)
+            .FirstOrDefault(card => DoesCardMatchReference(card, reference));
+        if (combatCard != null)
+            return combatCard;
+
+        if (reference.Card == null)
+            return null;
+
+        var usedDeckCards = GetUsedDeckCardsSet(usedDeckCardsByPlayer, player.NetId);
+        return RestoreDetachedCardFromSnapshot(runState, player, reference.Card, usedDeckCards, "singleplayer combat history restore");
+    }
+
+    private static bool DoesCardMatchReference(CardModel card, CombatLiveCardReferenceSnapshot reference)
+    {
+        if (reference.Card == null)
+            return true;
+
+        var currentCard = SingleplayerSerializableCardStateService.CaptureLiveCard(card) ?? card.ToSerializable();
+        if (!AreSerializableCardsEquivalent(currentCard, reference.Card.Card)
+            && !SingleplayerSerializableCardStateService.MatchesDeckCardForRestore(currentCard, reference.Card.Card))
+        {
+            return false;
+        }
+
+        var currentAfflictionId = card.Affliction?.Id;
+        if (currentAfflictionId != reference.Card.Affliction)
+            return false;
+
+        var currentAfflictionCount = card.Affliction?.Amount ?? 0;
+        if (currentAfflictionCount != reference.Card.AfflictionCount)
+            return false;
+
+        if (reference.Card.Keywords == null)
+            return true;
+
+        return card.Keywords.SequenceEqual(reference.Card.Keywords);
+    }
+
+    private static ISet<CardModel> GetUsedDeckCardsSet(Dictionary<ulong, ISet<CardModel>>? usedDeckCardsByPlayer, ulong playerId)
+    {
+        if (usedDeckCardsByPlayer == null)
+            return new HashSet<CardModel>();
+
+        if (!usedDeckCardsByPlayer.TryGetValue(playerId, out var usedDeckCards))
+        {
+            usedDeckCards = new HashSet<CardModel>();
+            usedDeckCardsByPlayer[playerId] = usedDeckCards;
+        }
+
+        return usedDeckCards;
     }
 
     private static void RestorePlayerOrbs(Player player, PlayerCombatState combat, IReadOnlyList<CombatOrbSnapshot> orbSnapshots)
@@ -1798,6 +1961,713 @@ public static class SingleplayerCombatStateSnapshotService
             RestoreOrbSnapshotState(orb, orbSnapshot);
             orbQueue.Insert(index, orb);
         }
+    }
+
+    private static void RestoreCombatHistory(
+        RunState runState,
+        CombatState combatState,
+        CombatStateSnapshot snapshot,
+        string restoreContext)
+    {
+        var history = CombatManager.Instance?.History;
+        if (history == null)
+            return;
+
+        history.Clear();
+        if (snapshot.History?.Entries.Count is not > 0)
+            return;
+
+        if (CombatHistoryEntriesField?.GetValue(history) is not IList entries)
+        {
+            MainFile.Logger.Warn($"Skipped restoring singleplayer combat history for {restoreContext} because the history entry list was unavailable.");
+            return;
+        }
+
+        var usedDeckCardsByPlayer = new Dictionary<ulong, ISet<CardModel>>();
+        foreach (var entrySnapshot in snapshot.History.Entries)
+        {
+            var restoredEntry = RestoreCombatHistoryEntry(
+                runState,
+                combatState,
+                history,
+                entrySnapshot,
+                usedDeckCardsByPlayer);
+            if (restoredEntry != null)
+                entries.Add(restoredEntry);
+        }
+
+        TryNotifyCombatHistoryChanged(history);
+
+        MainFile.Logger.Info(
+            $"Restored singleplayer combat history for {restoreContext}. " +
+            $"EntryCount={snapshot.History.Entries.Count}");
+    }
+
+    private static CombatHistoryEntry? RestoreCombatHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        try
+        {
+            return snapshot.Kind switch
+            {
+                CombatHistoryEntryKind.CardPlayStarted => RestoreCardPlayStartedHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer),
+                CombatHistoryEntryKind.CardPlayFinished => RestoreCardPlayFinishedHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer),
+                CombatHistoryEntryKind.CardAfflicted => RestoreCardAfflictedHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer),
+                CombatHistoryEntryKind.CardDiscarded => RestoreSingleCardHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer,
+                    static (card, roundNumber, currentSide, combatHistory, players) => new CardDiscardedEntry(card, roundNumber, currentSide, combatHistory, players)),
+                CombatHistoryEntryKind.CardDrawn => RestoreCardDrawnHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer),
+                CombatHistoryEntryKind.CardExhausted => RestoreSingleCardHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer,
+                    static (card, roundNumber, currentSide, combatHistory, players) => new CardExhaustedEntry(card, roundNumber, currentSide, combatHistory, players)),
+                CombatHistoryEntryKind.CardGenerated => RestoreCardGeneratedHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer),
+                CombatHistoryEntryKind.CreatureAttacked => RestoreCreatureAttackedHistoryEntry(
+                    combatState,
+                    history,
+                    snapshot),
+                CombatHistoryEntryKind.DamageReceived => RestoreDamageReceivedHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer),
+                CombatHistoryEntryKind.BlockGained => RestoreBlockGainedHistoryEntry(
+                    runState,
+                    combatState,
+                    history,
+                    snapshot,
+                    usedDeckCardsByPlayer),
+                CombatHistoryEntryKind.EnergySpent => RestorePlayerAmountHistoryEntry(
+                    combatState,
+                    history,
+                    snapshot,
+                    static (amount, player, roundNumber, currentSide, combatHistory, players) => new EnergySpentEntry(amount, player, roundNumber, currentSide, combatHistory, players)),
+                CombatHistoryEntryKind.PowerReceived => RestorePowerReceivedHistoryEntry(
+                    combatState,
+                    history,
+                    snapshot),
+                CombatHistoryEntryKind.StarsModified => RestorePlayerAmountHistoryEntry(
+                    combatState,
+                    history,
+                    snapshot,
+                    static (amount, player, roundNumber, currentSide, combatHistory, players) => new StarsModifiedEntry(amount, player, roundNumber, currentSide, combatHistory, players)),
+                CombatHistoryEntryKind.OrbChanneled => RestoreOrbChanneledHistoryEntry(
+                    combatState,
+                    history,
+                    snapshot),
+                _ => null
+            };
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to restore singleplayer combat history entry {snapshot.Kind}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static CombatHistoryEntry? RestoreCardPlayStartedHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        var cardPlay = RestoreHistoryCardPlay(runState, combatState, snapshot.CardPlay, usedDeckCardsByPlayer);
+        return cardPlay == null
+            ? null
+            : new CardPlayStartedEntry(cardPlay, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreCardPlayFinishedHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        var cardPlay = RestoreHistoryCardPlay(runState, combatState, snapshot.CardPlay, usedDeckCardsByPlayer);
+        if (cardPlay == null)
+            return null;
+
+        var entry = new CardPlayFinishedEntry(cardPlay, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+        if (snapshot.WasEthereal.HasValue && CardPlayFinishedWasEtherealField != null)
+            CardPlayFinishedWasEtherealField.SetValue(entry, snapshot.WasEthereal.Value);
+
+        return entry;
+    }
+
+    private static CombatHistoryEntry? RestoreCardAfflictedHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        var card = ResolveLiveCardReference(runState, combatState, snapshot.Card, usedDeckCardsByPlayer);
+        var affliction = CreateHistoryAffliction(snapshot, card);
+        return card == null || affliction == null
+            ? null
+            : new CardAfflictedEntry(card, affliction, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreCardDrawnHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        var card = ResolveLiveCardReference(runState, combatState, snapshot.Card, usedDeckCardsByPlayer);
+        return card == null
+            ? null
+            : new CardDrawnEntry(card, snapshot.RoundNumber, snapshot.CurrentSide, snapshot.FromHandDraw, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreCardGeneratedHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        var card = ResolveLiveCardReference(runState, combatState, snapshot.Card, usedDeckCardsByPlayer);
+        var creator = combatState.Players.FirstOrDefault();
+        return card == null || creator == null
+            ? null
+            : new CardGeneratedEntry(card, creator, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreCreatureAttackedHistoryEntry(
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot)
+    {
+        var attacker = ResolveCreatureReference(combatState, snapshot.Actor);
+        if (attacker == null)
+            return null;
+
+        var damageResults = snapshot.DamageResults
+            .Select(resultSnapshot => RestoreHistoryDamageResult(combatState, resultSnapshot))
+            .Where(result => result != null)
+            .Cast<DamageResult>()
+            .ToList();
+        return new CreatureAttackedEntry(attacker, damageResults, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreDamageReceivedHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        var result = RestoreHistoryDamageResult(combatState, snapshot.DamageResult);
+        if (result == null)
+            return null;
+
+        var dealer = ResolveCreatureReference(combatState, snapshot.Dealer);
+        var cardSource = ResolveLiveCardReference(runState, combatState, snapshot.Card, usedDeckCardsByPlayer);
+        return new DamageReceivedEntry(
+            result,
+            result.Receiver,
+            dealer,
+            cardSource,
+            snapshot.RoundNumber,
+            snapshot.CurrentSide,
+            history,
+            combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreBlockGainedHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        var receiver = ResolveCreatureReference(combatState, snapshot.Actor);
+        if (receiver == null)
+            return null;
+
+        var cardPlay = RestoreHistoryCardPlay(runState, combatState, snapshot.CardPlay, usedDeckCardsByPlayer);
+        var props = DeserializeValueProp(snapshot.ValuePropJson);
+        return new BlockGainedEntry(snapshot.Amount, props, cardPlay, receiver, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestorePowerReceivedHistoryEntry(
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot)
+    {
+        var owner = ResolveCreatureReference(combatState, snapshot.Actor);
+        if (owner == null || snapshot.PowerId == null)
+            return null;
+
+        var power = ResolveHistoryPower(owner, snapshot.PowerId, snapshot.PowerCurrentAmount);
+        if (power == null)
+            return null;
+
+        var applier = ResolveCreatureReference(combatState, snapshot.Applier);
+        return new PowerReceivedEntry(power, snapshot.DecimalAmount, applier, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreOrbChanneledHistoryEntry(
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot)
+    {
+        var orb = CreateHistoryOrb(combatState, snapshot);
+        return orb == null
+            ? null
+            : new OrbChanneledEntry(orb, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestorePlayerAmountHistoryEntry(
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Func<int, Player, int, CombatSide, CombatHistory, IEnumerable<Player>, CombatHistoryEntry> factory)
+    {
+        var player = ResolveCreatureReference(combatState, snapshot.Actor)?.Player;
+        return player == null
+            ? null
+            : factory(snapshot.Amount, player, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CombatHistoryEntry? RestoreSingleCardHistoryEntry(
+        RunState runState,
+        CombatState combatState,
+        CombatHistory history,
+        CombatHistoryEntrySnapshot snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer,
+        Func<CardModel, int, CombatSide, CombatHistory, IEnumerable<Player>, CombatHistoryEntry> factory)
+    {
+        var card = ResolveLiveCardReference(runState, combatState, snapshot.Card, usedDeckCardsByPlayer);
+        return card == null
+            ? null
+            : factory(card, snapshot.RoundNumber, snapshot.CurrentSide, history, combatState.Players);
+    }
+
+    private static CardPlay? RestoreHistoryCardPlay(
+        RunState runState,
+        CombatState combatState,
+        CombatHistoryCardPlaySnapshot? snapshot,
+        Dictionary<ulong, ISet<CardModel>> usedDeckCardsByPlayer)
+    {
+        if (snapshot == null)
+            return null;
+
+        var card = ResolveLiveCardReference(runState, combatState, snapshot.Card, usedDeckCardsByPlayer);
+        if (card == null)
+            return null;
+
+        return new CardPlay
+        {
+            Card = card,
+            Target = ResolveCreatureReference(combatState, snapshot.Target),
+            ResultPile = snapshot.ResultPile,
+            Resources = new ResourceInfo
+            {
+                EnergySpent = snapshot.Resources.EnergySpent,
+                EnergyValue = snapshot.Resources.EnergyValue,
+                StarsSpent = snapshot.Resources.StarsSpent,
+                StarValue = snapshot.Resources.StarValue
+            },
+            IsAutoPlay = snapshot.IsAutoPlay,
+            PlayIndex = snapshot.PlayIndex,
+            PlayCount = snapshot.PlayCount
+        };
+    }
+
+    private static DamageResult? RestoreHistoryDamageResult(CombatState combatState, CombatHistoryDamageResultSnapshot? snapshot)
+    {
+        if (snapshot == null)
+            return null;
+
+        var receiver = ResolveCreatureReference(combatState, snapshot.Receiver);
+        if (receiver == null)
+            return null;
+
+        var result = new DamageResult(receiver, DeserializeValueProp(snapshot.ValuePropJson))
+        {
+            BlockedDamage = snapshot.BlockedDamage,
+            UnblockedDamage = snapshot.UnblockedDamage,
+            OverkillDamage = snapshot.OverkillDamage,
+            WasBlockBroken = snapshot.WasBlockBroken,
+            WasFullyBlocked = snapshot.WasFullyBlocked,
+            WasTargetKilled = snapshot.WasTargetKilled
+        };
+        return result;
+    }
+
+    private static PowerModel? ResolveHistoryPower(Creature owner, ModelId powerId, int powerAmount)
+    {
+        var currentPower = owner.Powers.LastOrDefault(power => power.Id == powerId);
+        if (currentPower != null)
+            return currentPower;
+
+        try
+        {
+            var power = ModelDb.GetById<PowerModel>(powerId).ToMutable();
+            PowerModelOwnerField?.SetValue(power, owner);
+            PowerModelAmountField?.SetValue(power, powerAmount);
+            return power;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to recreate history power {powerId.Entry}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static AfflictionModel? CreateHistoryAffliction(CombatHistoryEntrySnapshot snapshot, CardModel? card)
+    {
+        if (snapshot.AfflictionId == null || card == null)
+            return null;
+
+        try
+        {
+            var affliction = ModelDb.GetById<AfflictionModel>(snapshot.AfflictionId).ToMutable();
+            affliction.Card = card;
+            affliction.Amount = snapshot.AfflictionAmount;
+            return affliction;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to recreate history affliction {snapshot.AfflictionId.Entry}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static OrbModel? CreateHistoryOrb(CombatState combatState, CombatHistoryEntrySnapshot snapshot)
+    {
+        if (snapshot.Orb == null)
+            return null;
+
+        var player = ResolveCreatureReference(combatState, snapshot.Actor)?.Player;
+        if (player == null)
+            return null;
+
+        try
+        {
+            var orb = ModelDb.GetById<OrbModel>(snapshot.Orb.Id).ToMutable();
+            orb.Owner = player;
+            RestoreOrbSnapshotState(orb, snapshot.Orb);
+            return orb;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to recreate history orb {snapshot.Orb.Id.Entry}: {e.Message}");
+            return null;
+        }
+    }
+
+    private static Creature? ResolveCreatureReference(CombatState combatState, CombatCreatureReferenceSnapshot? reference)
+    {
+        if (reference == null)
+            return null;
+
+        if (reference.PlayerId.HasValue)
+        {
+            return combatState.Players
+                .FirstOrDefault(player => player.NetId == reference.PlayerId.Value)
+                ?.Creature;
+        }
+
+        if (reference.CombatId.HasValue)
+        {
+            var byCombatId = combatState.Creatures.FirstOrDefault(creature =>
+                creature.Player == null
+                && creature.CombatId == reference.CombatId.Value);
+            if (byCombatId != null)
+                return byCombatId;
+        }
+
+        if (reference.PetOwnerPlayerId.HasValue && reference.MonsterId != null)
+        {
+            var petCandidates = combatState.Creatures
+                .Where(creature => creature.Player == null
+                    && creature.PetOwner?.NetId == reference.PetOwnerPlayerId.Value
+                    && creature.Monster?.Id == reference.MonsterId)
+                .ToList();
+            if (petCandidates.Count > 0)
+            {
+                if (!string.IsNullOrWhiteSpace(reference.SlotName))
+                {
+                    var byPetSlot = petCandidates.FirstOrDefault(creature =>
+                        string.Equals(creature.SlotName, reference.SlotName, StringComparison.Ordinal));
+                    if (byPetSlot != null)
+                        return byPetSlot;
+                }
+
+                return reference.MonsterInstanceIndex >= 0 && reference.MonsterInstanceIndex < petCandidates.Count
+                    ? petCandidates[reference.MonsterInstanceIndex]
+                    : petCandidates[0];
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(reference.SlotName))
+        {
+            var bySlot = combatState.Creatures.FirstOrDefault(creature =>
+                creature.Player == null
+                && string.Equals(creature.SlotName, reference.SlotName, StringComparison.Ordinal));
+            if (bySlot != null)
+                return bySlot;
+        }
+
+        if (reference.MonsterId == null)
+            return null;
+
+        var byMonsterId = combatState.Creatures
+            .Where(creature => creature.Player == null && creature.Monster?.Id == reference.MonsterId)
+            .ToList();
+        if (byMonsterId.Count == 0)
+            return null;
+
+        return reference.MonsterInstanceIndex >= 0 && reference.MonsterInstanceIndex < byMonsterId.Count
+            ? byMonsterId[reference.MonsterInstanceIndex]
+            : byMonsterId[0];
+    }
+
+    private static int GetMonsterInstanceIndex(Creature creature)
+    {
+        if (creature.Player != null || creature.Monster?.Id == null || creature.CombatState == null)
+            return 0;
+
+        var matchingCreatures = creature.CombatState.Creatures
+            .Where(entry => entry.Player == null && entry.Monster?.Id == creature.Monster.Id)
+            .ToList();
+        var index = matchingCreatures.IndexOf(creature);
+        return index >= 0 ? index : 0;
+    }
+
+    private static void TryNotifyCombatHistoryChanged(CombatHistory history)
+    {
+        try
+        {
+            (CombatHistoryChangedField?.GetValue(history) as Action)?.Invoke();
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Failed to notify combat history listeners after singleplayer restore: {e.Message}");
+        }
+    }
+
+    private static ValueProp DeserializeValueProp(string? valueJson)
+    {
+        return string.IsNullOrWhiteSpace(valueJson)
+            ? default
+            : JsonSerializer.Deserialize<ValueProp>(valueJson, JsonOptions);
+    }
+
+    private static CombatHistorySnapshot? CaptureCombatHistory()
+    {
+        var history = CombatManager.Instance?.History;
+        if (history == null)
+            return null;
+
+        var entries = history.Entries
+            .Select(CaptureCombatHistoryEntry)
+            .Where(entry => entry != null)
+            .Cast<CombatHistoryEntrySnapshot>()
+            .ToList();
+        return new CombatHistorySnapshot
+        {
+            Entries = entries
+        };
+    }
+
+    private static CombatHistoryEntrySnapshot? CaptureCombatHistoryEntry(CombatHistoryEntry entry)
+    {
+        var snapshot = new CombatHistoryEntrySnapshot
+        {
+            RoundNumber = ReadCombatHistoryRoundNumber(entry),
+            CurrentSide = ReadCombatHistoryCurrentSide(entry),
+            Actor = CombatCreatureReferenceSnapshot.FromCreature(entry.Actor)
+        };
+
+        switch (entry)
+        {
+            case CardPlayStartedEntry startedEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CardPlayStarted;
+                snapshot.CardPlay = CaptureHistoryCardPlay(startedEntry.CardPlay);
+                return snapshot;
+            case CardPlayFinishedEntry finishedEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CardPlayFinished;
+                snapshot.CardPlay = CaptureHistoryCardPlay(finishedEntry.CardPlay);
+                snapshot.WasEthereal = finishedEntry.WasEthereal;
+                return snapshot;
+            case CardAfflictedEntry afflictedEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CardAfflicted;
+                snapshot.Card = CaptureLiveCardReference(afflictedEntry.Card);
+                snapshot.AfflictionId = afflictedEntry.Affliction.Id;
+                snapshot.AfflictionAmount = afflictedEntry.Affliction.Amount;
+                return snapshot;
+            case CardDiscardedEntry discardedEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CardDiscarded;
+                snapshot.Card = CaptureLiveCardReference(discardedEntry.Card);
+                return snapshot;
+            case CardDrawnEntry drawnEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CardDrawn;
+                snapshot.Card = CaptureLiveCardReference(drawnEntry.Card);
+                snapshot.FromHandDraw = drawnEntry.FromHandDraw;
+                return snapshot;
+            case CardExhaustedEntry exhaustedEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CardExhausted;
+                snapshot.Card = CaptureLiveCardReference(exhaustedEntry.Card);
+                return snapshot;
+            case CardGeneratedEntry generatedEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CardGenerated;
+                snapshot.Card = CaptureLiveCardReference(generatedEntry.Card);
+                snapshot.GeneratedByPlayer = generatedEntry.Creator != null;
+                return snapshot;
+            case CreatureAttackedEntry attackedEntry:
+                snapshot.Kind = CombatHistoryEntryKind.CreatureAttacked;
+                snapshot.DamageResults = attackedEntry.DamageResults
+                    .Select(CaptureHistoryDamageResult)
+                    .Where(result => result != null)
+                    .Cast<CombatHistoryDamageResultSnapshot>()
+                    .ToList();
+                return snapshot;
+            case DamageReceivedEntry damageEntry:
+                snapshot.Kind = CombatHistoryEntryKind.DamageReceived;
+                snapshot.Dealer = CombatCreatureReferenceSnapshot.FromCreature(damageEntry.Dealer);
+                snapshot.Card = CaptureLiveCardReference(damageEntry.CardSource);
+                snapshot.DamageResult = CaptureHistoryDamageResult(damageEntry.Result);
+                return snapshot;
+            case BlockGainedEntry blockEntry:
+                snapshot.Kind = CombatHistoryEntryKind.BlockGained;
+                snapshot.Amount = blockEntry.Amount;
+                snapshot.ValuePropJson = JsonSerializer.Serialize(blockEntry.Props, JsonOptions);
+                snapshot.CardPlay = CaptureHistoryCardPlay(blockEntry.CardPlay);
+                return snapshot;
+            case EnergySpentEntry energyEntry:
+                snapshot.Kind = CombatHistoryEntryKind.EnergySpent;
+                snapshot.Amount = energyEntry.Amount;
+                return snapshot;
+            case PowerReceivedEntry powerEntry:
+                snapshot.Kind = CombatHistoryEntryKind.PowerReceived;
+                snapshot.PowerId = powerEntry.Power.Id;
+                snapshot.PowerCurrentAmount = powerEntry.Power.Amount;
+                snapshot.DecimalAmount = powerEntry.Amount;
+                snapshot.Applier = CombatCreatureReferenceSnapshot.FromCreature(powerEntry.Applier);
+                return snapshot;
+            case StarsModifiedEntry starsEntry:
+                snapshot.Kind = CombatHistoryEntryKind.StarsModified;
+                snapshot.Amount = starsEntry.Amount;
+                return snapshot;
+            case OrbChanneledEntry orbEntry:
+                snapshot.Kind = CombatHistoryEntryKind.OrbChanneled;
+                snapshot.Orb = CaptureHistoryOrbSnapshot(orbEntry.Orb);
+                return snapshot;
+            default:
+                return null;
+        }
+    }
+
+    private static int ReadCombatHistoryRoundNumber(CombatHistoryEntry entry)
+    {
+        return CombatHistoryEntryRoundNumberProperty?.GetValue(entry) is int roundNumber
+            ? roundNumber
+            : 0;
+    }
+
+    private static CombatSide ReadCombatHistoryCurrentSide(CombatHistoryEntry entry)
+    {
+        return CombatHistoryEntryCurrentSideProperty?.GetValue(entry) is CombatSide currentSide
+            ? currentSide
+            : CombatSide.Player;
+    }
+
+    private static CombatHistoryCardPlaySnapshot? CaptureHistoryCardPlay(CardPlay? cardPlay)
+    {
+        if (cardPlay == null)
+            return null;
+
+        return new CombatHistoryCardPlaySnapshot
+        {
+            Card = CaptureLiveCardReference(cardPlay.Card),
+            Target = CombatCreatureReferenceSnapshot.FromCreature(cardPlay.Target),
+            ResultPile = cardPlay.ResultPile,
+            Resources = new CombatHistoryResourceInfoSnapshot
+            {
+                EnergySpent = cardPlay.Resources.EnergySpent,
+                EnergyValue = cardPlay.Resources.EnergyValue,
+                StarsSpent = cardPlay.Resources.StarsSpent,
+                StarValue = cardPlay.Resources.StarValue
+            },
+            IsAutoPlay = cardPlay.IsAutoPlay,
+            PlayIndex = cardPlay.PlayIndex,
+            PlayCount = cardPlay.PlayCount
+        };
+    }
+
+    private static CombatHistoryDamageResultSnapshot? CaptureHistoryDamageResult(DamageResult? result)
+    {
+        if (result == null)
+            return null;
+
+        return new CombatHistoryDamageResultSnapshot
+        {
+            Receiver = CombatCreatureReferenceSnapshot.FromCreature(result.Receiver),
+            ValuePropJson = JsonSerializer.Serialize(result.Props, JsonOptions),
+            BlockedDamage = result.BlockedDamage,
+            UnblockedDamage = result.UnblockedDamage,
+            OverkillDamage = result.OverkillDamage,
+            WasBlockBroken = result.WasBlockBroken,
+            WasFullyBlocked = result.WasFullyBlocked,
+            WasTargetKilled = result.WasTargetKilled
+        };
+    }
+
+    private static CombatOrbSnapshot? CaptureHistoryOrbSnapshot(OrbModel? orb)
+    {
+        if (orb == null)
+            return null;
+
+        return new CombatOrbSnapshot
+        {
+            Id = orb.Id,
+            Passive = (int)orb.PassiveVal,
+            Evoke = (int)orb.EvokeVal
+        };
     }
 
     private static void SynchronizePlayerOrbManagersForSingleplayerRestore(CombatState combatState, string restoreContext)
@@ -2642,6 +3512,111 @@ public static class SingleplayerCombatStateSnapshotService
         }
     }
 
+    public enum CombatHistoryEntryKind
+    {
+        CardPlayStarted,
+        CardPlayFinished,
+        CardAfflicted,
+        CardDiscarded,
+        CardDrawn,
+        CardExhausted,
+        CardGenerated,
+        CreatureAttacked,
+        DamageReceived,
+        BlockGained,
+        EnergySpent,
+        PowerReceived,
+        StarsModified,
+        OrbChanneled
+    }
+
+    public sealed class CombatHistorySnapshot
+    {
+        public List<CombatHistoryEntrySnapshot> Entries { get; set; } = [];
+    }
+
+    public sealed class CombatHistoryEntrySnapshot
+    {
+        public CombatHistoryEntryKind Kind { get; set; }
+        public int RoundNumber { get; set; }
+        public CombatSide CurrentSide { get; set; }
+        public CombatCreatureReferenceSnapshot? Actor { get; set; }
+        public CombatLiveCardReferenceSnapshot? Card { get; set; }
+        public CombatHistoryCardPlaySnapshot? CardPlay { get; set; }
+        public CombatHistoryDamageResultSnapshot? DamageResult { get; set; }
+        public List<CombatHistoryDamageResultSnapshot> DamageResults { get; set; } = [];
+        public CombatCreatureReferenceSnapshot? Dealer { get; set; }
+        public CombatCreatureReferenceSnapshot? Applier { get; set; }
+        public CombatOrbSnapshot? Orb { get; set; }
+        public string? ValuePropJson { get; set; }
+        public int Amount { get; set; }
+        public decimal DecimalAmount { get; set; }
+        public bool FromHandDraw { get; set; }
+        public bool GeneratedByPlayer { get; set; }
+        public bool? WasEthereal { get; set; }
+        public ModelId? PowerId { get; set; }
+        public int PowerCurrentAmount { get; set; }
+        public ModelId? AfflictionId { get; set; }
+        public int AfflictionAmount { get; set; }
+    }
+
+    public sealed class CombatHistoryCardPlaySnapshot
+    {
+        public CombatLiveCardReferenceSnapshot? Card { get; set; }
+        public CombatCreatureReferenceSnapshot? Target { get; set; }
+        public PileType ResultPile { get; set; }
+        public CombatHistoryResourceInfoSnapshot Resources { get; set; } = new();
+        public bool IsAutoPlay { get; set; }
+        public int PlayIndex { get; set; }
+        public int PlayCount { get; set; }
+    }
+
+    public sealed class CombatHistoryResourceInfoSnapshot
+    {
+        public int EnergySpent { get; set; }
+        public int EnergyValue { get; set; }
+        public int StarsSpent { get; set; }
+        public int StarValue { get; set; }
+    }
+
+    public sealed class CombatHistoryDamageResultSnapshot
+    {
+        public CombatCreatureReferenceSnapshot? Receiver { get; set; }
+        public string? ValuePropJson { get; set; }
+        public int BlockedDamage { get; set; }
+        public int UnblockedDamage { get; set; }
+        public int OverkillDamage { get; set; }
+        public bool WasBlockBroken { get; set; }
+        public bool WasFullyBlocked { get; set; }
+        public bool WasTargetKilled { get; set; }
+    }
+
+    public sealed class CombatCreatureReferenceSnapshot
+    {
+        public ulong? PlayerId { get; set; }
+        public uint? CombatId { get; set; }
+        public string? SlotName { get; set; }
+        public ulong? PetOwnerPlayerId { get; set; }
+        public ModelId? MonsterId { get; set; }
+        public int MonsterInstanceIndex { get; set; }
+
+        public static CombatCreatureReferenceSnapshot? FromCreature(Creature? creature)
+        {
+            if (creature == null)
+                return null;
+
+            return new CombatCreatureReferenceSnapshot
+            {
+                PlayerId = creature.Player?.NetId,
+                CombatId = creature.Player == null ? creature.CombatId : null,
+                SlotName = creature.Player == null ? creature.SlotName : null,
+                PetOwnerPlayerId = creature.PetOwner?.NetId,
+                MonsterId = creature.Monster?.Id,
+                MonsterInstanceIndex = GetMonsterInstanceIndex(creature)
+            };
+        }
+    }
+
     public sealed class CombatStateSnapshot
     {
         public List<CombatCreatureSnapshot> Creatures { get; set; } = [];
@@ -2649,6 +3624,7 @@ public static class SingleplayerCombatStateSnapshotService
         public List<string> EncounterSlots { get; set; } = [];
         public SerializableRunRngSet Rng { get; set; } = new();
         public CombatManagerSnapshot? CombatManager { get; set; }
+        public CombatHistorySnapshot? History { get; set; }
         public int RoundNumber { get; set; }
         public CombatSide CurrentSide { get; set; }
         public List<uint> NextChoiceIds { get; set; } = [];
@@ -2668,6 +3644,7 @@ public static class SingleplayerCombatStateSnapshotService
                 EncounterSlots = CaptureEncounterSlots(runState),
                 Rng = netState.Rng,
                 CombatManager = CombatManagerSnapshot.Capture(),
+                History = CaptureCombatHistory(),
                 RoundNumber = combatState?.RoundNumber ?? 1,
                 CurrentSide = combatState?.CurrentSide ?? CombatSide.Player,
                 NextChoiceIds = netState.nextChoiceIds.ToList(),
@@ -2985,7 +3962,7 @@ public static class SingleplayerCombatStateSnapshotService
                 CharacterId = state.characterId,
                 Energy = state.energy,
                 Stars = state.stars,
-                MaxStars = state.maxStars,
+                MaxStars = state.stars,
                 MaxPotionCount = state.maxPotionCount,
                 Gold = state.gold,
                 Piles = state.piles.Select(pileState =>
@@ -3041,17 +4018,19 @@ public static class SingleplayerCombatStateSnapshotService
         public ModelId? Affliction { get; set; }
         public int AfflictionCount { get; set; }
         public List<CardKeyword>? Keywords { get; set; }
+        public List<SpecialFieldSnapshot> SpecialFields { get; set; } = [];
 
         public static CombatCardSnapshot FromNetState(NetFullCombatState.CardState state, CardModel? actualCard)
         {
             return new CombatCardSnapshot
             {
-                Card = state.card,
+                Card = SingleplayerSerializableCardStateService.CaptureCombatCard(state.card, actualCard, actualCard?.Owner),
                 HadDeckVersion = actualCard?.DeckVersion != null,
-                DeckVersionCard = actualCard?.DeckVersion?.ToSerializable(),
+                DeckVersionCard = SingleplayerSerializableCardStateService.CaptureLiveCard(actualCard?.DeckVersion),
                 Affliction = state.affliction,
                 AfflictionCount = state.afflictionCount,
-                Keywords = state.keywords?.ToList()
+                Keywords = state.keywords?.ToList(),
+                SpecialFields = CaptureSpecialCardFields(actualCard)
             };
         }
 
@@ -3062,12 +4041,13 @@ public static class SingleplayerCombatStateSnapshotService
 
             return new CombatCardSnapshot
             {
-                Card = card.ToSerializable(),
+                Card = SingleplayerSerializableCardStateService.CaptureLiveCard(card)!,
                 HadDeckVersion = card.DeckVersion != null,
-                DeckVersionCard = card.DeckVersion?.ToSerializable(),
+                DeckVersionCard = SingleplayerSerializableCardStateService.CaptureLiveCard(card.DeckVersion),
                 Affliction = card.Affliction?.Id,
                 AfflictionCount = card.Affliction?.Amount ?? 0,
-                Keywords = card.Keywords.ToList()
+                Keywords = card.Keywords.ToList(),
+                SpecialFields = CaptureSpecialCardFields(card)
             };
         }
     }
@@ -3113,6 +4093,14 @@ public static class SingleplayerCombatStateSnapshotService
                 Evoke = state.evoke
             };
         }
+    }
+
+    public sealed class CombatLiveCardReferenceSnapshot
+    {
+        public ulong PlayerId { get; set; }
+        public PileType PileType { get; set; }
+        public int CardIndex { get; set; }
+        public CombatCardSnapshot? Card { get; set; }
     }
 
     public sealed class SpecialFieldSnapshot

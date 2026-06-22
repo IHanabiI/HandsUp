@@ -93,7 +93,7 @@ public static class PromotePlayableReplaySessionToSingleplayerPatch
     }
 }
 
-[HarmonyPatch(typeof(RunManager), "get_IsSinglePlayerOrFakeMultiplayer")]
+[HarmonyPatch(typeof(RunManager), "get_IsSingleplayerOrFakeMultiplayer")]
 public static class PromotePlayableReplaySessionToSingleplayerRunPatch
 {
     public static bool Prefix(ref bool __result)

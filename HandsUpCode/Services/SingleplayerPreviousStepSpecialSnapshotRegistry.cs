@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using MegaCrit.Sts2.Core.Models;
 
 namespace HandsUp.HandsUpCode.Services;
 
@@ -55,6 +56,16 @@ public static class SingleplayerPreviousStepSpecialSnapshotRegistry
         ["SURROUNDED_POWER"] = ["_facing"]
     };
 
+    private static readonly Dictionary<string, string[]> CardPrivateFieldsByTypeName = new()
+    {
+        ["Claw"] = ["_extraDamageFromClawPlays"],
+        ["KinglyPunch"] = ["_extraDamage"],
+        ["Maul"] = ["_extraDamageFromMaulPlays"],
+        ["Rampage"] = ["_extraDamageFromPlays"],
+        ["SovereignBlade"] = ["_createdThroughForge", "_currentDamage", "_currentRepeats"],
+        ["Thrash"] = ["_extraDamage"]
+    };
+
     public static bool TryGetMonsterPrivateFields(string monsterIdEntry, out IReadOnlyList<string> fieldNames)
     {
         if (MonsterPrivateFields.TryGetValue(monsterIdEntry, out var fields))
@@ -70,6 +81,18 @@ public static class SingleplayerPreviousStepSpecialSnapshotRegistry
     public static bool TryGetPowerPrivateFields(string powerIdEntry, out IReadOnlyList<string> fieldNames)
     {
         if (PowerPrivateFields.TryGetValue(powerIdEntry, out var fields))
+        {
+            fieldNames = fields;
+            return true;
+        }
+
+        fieldNames = [];
+        return false;
+    }
+
+    public static bool TryGetCardPrivateFields(CardModel? card, out IReadOnlyList<string> fieldNames)
+    {
+        if (card != null && CardPrivateFieldsByTypeName.TryGetValue(card.GetType().Name, out var fields))
         {
             fieldNames = fields;
             return true;

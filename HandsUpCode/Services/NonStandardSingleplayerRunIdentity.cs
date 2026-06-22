@@ -27,7 +27,7 @@ public static class NonStandardSingleplayerRunIdentity
     public static bool TryCreateScope(RunManager? runManager, out SnapshotScope scope)
     {
         scope = default;
-        if (runManager == null || !runManager.IsSinglePlayerOrFakeMultiplayer)
+        if (runManager == null || !runManager.IsSingleplayerOrFakeMultiplayer)
             return false;
 
         var snapshot = runManager.ToSave(null);

@@ -162,7 +162,7 @@ public static class SingleplayerPreviousStepSnapshotCoordinator
 
         var runState = runManager?.DebugOnlyGetState();
         var combatState = CombatManager.Instance.DebugOnlyGetState();
-        if (runManager == null || runState == null || combatState == null || !runManager.IsSinglePlayerOrFakeMultiplayer)
+        if (runManager == null || runState == null || combatState == null || !runManager.IsSingleplayerOrFakeMultiplayer)
         {
             failureReason = "run state unavailable";
             return false;
@@ -188,7 +188,7 @@ public static class SingleplayerPreviousStepSnapshotCoordinator
 
         var runState = runManager?.DebugOnlyGetState();
         var combatState = CombatManager.Instance.DebugOnlyGetState();
-        if (runManager == null || runState == null || combatState == null || !runManager.IsSinglePlayerOrFakeMultiplayer)
+        if (runManager == null || runState == null || combatState == null || !runManager.IsSingleplayerOrFakeMultiplayer)
         {
             failureReason = "run state unavailable";
             return false;

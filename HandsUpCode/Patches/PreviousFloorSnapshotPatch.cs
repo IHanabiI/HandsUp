@@ -10,7 +10,7 @@ public static class PreviousFloorSnapshotPatch
 {
     public static void Prefix(RunManager __instance, MapCoord coord)
     {
-        if (!__instance.IsSinglePlayerOrFakeMultiplayer)
+        if (!__instance.IsSingleplayerOrFakeMultiplayer)
             return;
 
         try

@@ -307,7 +307,7 @@ public partial class RaiseHandSubmenu : NSubmenu
     {
         try
         {
-            if (!RunManager.Instance.IsSinglePlayerOrFakeMultiplayer)
+            if (!RunManager.Instance.IsSingleplayerOrFakeMultiplayer)
             {
                 SetStatusText("\u5f53\u524d\u7248\u672c\u7684\u91cd\u5f00\u5148\u53ea\u652f\u6301\u5355\u4eba\u5c40\u3002");
                 return;
@@ -334,7 +334,7 @@ public partial class RaiseHandSubmenu : NSubmenu
                 .ToList();
             var seed = RunManager.Instance.DailyTime != null
                 ? runState.Rng.StringSeed
-                : SeedHelper.GetRandomSeed(10);
+                : SeedHelper.GetRandomSeed(runState.Rng.Niche, 10);
             var ascensionLevel = runState.AscensionLevel;
             var dailyTime = RunManager.Instance.DailyTime;
             var gameMode = DeriveCurrentSingleplayerGameMode(runState);
@@ -362,7 +362,7 @@ public partial class RaiseHandSubmenu : NSubmenu
     {
         try
         {
-            if (!RunManager.Instance.IsSinglePlayerOrFakeMultiplayer)
+            if (!RunManager.Instance.IsSingleplayerOrFakeMultiplayer)
             {
                 SetStatusText("\u5f53\u524d\u7248\u672c\u7684\u5c40\u90e8\u91cd\u5f00\u5148\u53ea\u652f\u6301\u5355\u4eba\u5c40\u3002");
                 return;
@@ -403,7 +403,7 @@ public partial class RaiseHandSubmenu : NSubmenu
 
             RunManager.Instance.CleanUp(true);
             NGame.Instance.ReactionContainer.InitializeNetworking(new NetSingleplayerGameService());
-            RunManager.Instance.SetUpSavedSinglePlayer(restoredRunState, serializableRun);
+            RunManager.Instance.SetUpSavedSingleplayer(restoredRunState, serializableRun);
             await NGame.Instance.LoadRun(restoredRunState, serializableRun.PreFinishedRoom);
             await NGame.Instance.Transition.FadeIn(0.8f, "res://materials/transitions/fade_transition_mat.tres", null);
         }
@@ -418,7 +418,7 @@ public partial class RaiseHandSubmenu : NSubmenu
     {
         try
         {
-            if (!RunManager.Instance.IsSinglePlayerOrFakeMultiplayer)
+            if (!RunManager.Instance.IsSingleplayerOrFakeMultiplayer)
             {
                 SetStatusText("\u5f53\u524d\u7248\u672c\u7684\u56de\u9000\u5230\u4e0a\u4e00\u5c42\u5148\u53ea\u652f\u6301\u5355\u4eba\u5c40\u3002");
                 return;
@@ -462,7 +462,7 @@ public partial class RaiseHandSubmenu : NSubmenu
 
         RunManager.Instance.CleanUp(true);
         NGame.Instance.ReactionContainer.InitializeNetworking(new NetSingleplayerGameService());
-        RunManager.Instance.SetUpSavedSinglePlayer(runState, serializableRun);
+        RunManager.Instance.SetUpSavedSingleplayer(runState, serializableRun);
 
         await PreloadManager.LoadRunAssets(runState.Players.Select(player => player.Character));
         await PreloadManager.LoadActAssets(runState.Act);
@@ -514,7 +514,7 @@ public partial class RaiseHandSubmenu : NSubmenu
     {
         try
         {
-            if (!RunManager.Instance.IsSinglePlayerOrFakeMultiplayer)
+            if (!RunManager.Instance.IsSingleplayerOrFakeMultiplayer)
             {
                 SetStatusText("\u5f53\u524d\u7248\u672c\u7684\u56de\u9000\u5230\u4e0a\u4e00\u6b65\u5148\u53ea\u652f\u6301\u5355\u4eba\u5c40\u3002");
                 return;
@@ -660,7 +660,7 @@ public partial class RaiseHandSubmenu : NSubmenu
 
         RunManager.Instance.CleanUp(true);
         NGame.Instance.ReactionContainer.InitializeNetworking(new NetSingleplayerGameService());
-        RunManager.Instance.SetUpSavedSinglePlayer(runState, serializableRun);
+        RunManager.Instance.SetUpSavedSingleplayer(runState, serializableRun);
         await PreloadManager.LoadRunAssets(runState.Players.Select(player => player.Character));
         await PreloadManager.LoadActAssets(runState.Act);
 

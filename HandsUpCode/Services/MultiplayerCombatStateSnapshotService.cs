@@ -730,7 +730,7 @@ public static partial class MultiplayerCombatStateSnapshotService
                 CharacterId = state.characterId,
                 Energy = state.energy,
                 Stars = state.stars,
-                MaxStars = state.maxStars,
+                MaxStars = state.stars,
                 MaxPotionCount = state.maxPotionCount,
                 Gold = state.gold,
                 Piles = state.piles.Select(CombatPileSnapshot.FromNetState).ToList(),

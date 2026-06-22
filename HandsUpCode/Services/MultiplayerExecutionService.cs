@@ -41,6 +41,8 @@ public static class MultiplayerExecutionService
         .GetMethod("InitializeShared", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? InitializeNewRunMethod = typeof(RunManager)
         .GetMethod("InitializeNewRun", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? InitializeRunLobbyMethod = typeof(RunManager)
+        .GetMethod("InitializeRunLobby", BindingFlags.Instance | BindingFlags.NonPublic);
 
     public static async Task ExecuteApprovedActionAsync(RaiseHandActionKind actionKind, string? runJson, string? roomJson, string? sourceRoomType, string? combatStateJson = null, string? restoreHint = null)
     {
@@ -224,7 +226,7 @@ public static class MultiplayerExecutionService
             }
 
             await PrepareCurrentMultiplayerRunForReload();
-            RunManager.Instance.SetUpSavedMultiPlayer(runState, loadLobby);
+            RunManager.Instance.SetUpSavedMultiplayer(runState, loadLobby);
 
             if (!string.IsNullOrWhiteSpace(combatStateJson))
                 MultiplayerInitialCombatPileSnapshotService.ArmSnapshotJsonForNextInitialDraw(combatStateJson, "multiplayer soft restart");
@@ -402,7 +404,7 @@ public static class MultiplayerExecutionService
             }
 
             await PrepareCurrentMultiplayerRunForReload();
-            RunManager.Instance.SetUpSavedMultiPlayer(runState, loadLobby);
+            RunManager.Instance.SetUpSavedMultiplayer(runState, loadLobby);
             await PreloadManager.LoadRunAssets(runState.Players.Select(player => player.Character));
             await PreloadManager.LoadActAssets(runState.Act);
 
@@ -480,7 +482,7 @@ public static class MultiplayerExecutionService
             }
 
             await PrepareCurrentMultiplayerRunForReload();
-            RunManager.Instance.SetUpSavedMultiPlayer(runState, loadLobby);
+            RunManager.Instance.SetUpSavedMultiplayer(runState, loadLobby);
             await PreloadManager.LoadRunAssets(runState.Players.Select(player => player.Character));
             await PreloadManager.LoadActAssets(runState.Act);
 
@@ -523,12 +525,12 @@ public static class MultiplayerExecutionService
     private static void InitializeFreshMultiplayerRun(RunState runState, INetGameService netService, System.DateTimeOffset? dailyTime)
     {
         var runManager = RunManager.Instance;
-        if (StateProperty == null || InitializeSharedMethod == null || InitializeNewRunMethod == null)
+        if (StateProperty == null || InitializeSharedMethod == null || InitializeNewRunMethod == null || InitializeRunLobbyMethod == null)
             throw new System.InvalidOperationException("Failed to resolve RunManager initialization methods for multiplayer restart.");
 
         StateProperty.SetValue(runManager, runState);
         InitializeSharedMethod.Invoke(runManager, BuildInitializeSharedArguments(netService, dailyTime));
-        runManager.InitializeRunLobby(netService, runState);
+        InitializeRunLobbyMethod.Invoke(runManager, [netService, runState]);
         InitializeNewRunMethod.Invoke(runManager, []);
         runManager.GenerateRooms();
     }

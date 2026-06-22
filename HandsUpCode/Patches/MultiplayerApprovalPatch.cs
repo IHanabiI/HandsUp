@@ -5,7 +5,7 @@ using MegaCrit.Sts2.Core.Runs;
 
 namespace HandsUp.HandsUpCode.Patches;
 
-[HarmonyPatch(typeof(RunManager), nameof(RunManager.InitializeRunLobby))]
+[HarmonyPatch(typeof(RunManager), "InitializeRunLobby")]
 public static class RegisterMultiplayerApprovalHandlersPatch
 {
     public static void Postfix(INetGameService netService, RunState state)

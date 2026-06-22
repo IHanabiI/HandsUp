@@ -205,7 +205,7 @@ public static class SingleplayerPreviousStepReplayService
         marker = null;
 
         var runState = runManager?.DebugOnlyGetState();
-        if (runManager == null || runState == null || !runManager.IsSinglePlayerOrFakeMultiplayer)
+        if (runManager == null || runState == null || !runManager.IsSingleplayerOrFakeMultiplayer)
             return false;
 
         if (runState.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
@@ -258,7 +258,7 @@ public static class SingleplayerPreviousStepReplayService
         replay = null;
 
         var runState = runManager?.DebugOnlyGetState();
-        if (runManager == null || runState == null || !runManager.IsSinglePlayerOrFakeMultiplayer)
+        if (runManager == null || runState == null || !runManager.IsSingleplayerOrFakeMultiplayer)
             return false;
 
         if (runState.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)
@@ -645,7 +645,7 @@ public static class SingleplayerPreviousStepReplayService
             var handDisabled = GetHandDisabledState();
             var netType = RunManager.Instance.NetService?.Type.ToString() ?? "null";
             var netServiceImpl = RunManager.Instance.NetService?.GetType().Name ?? "null";
-            var isSinglePlayer = RunManager.Instance.IsSinglePlayerOrFakeMultiplayer;
+            var isSinglePlayer = RunManager.Instance.IsSingleplayerOrFakeMultiplayer;
             var handCanPlayCards = GetHandCanPlayCardsState();
             var handActionsAllowed = GetHandActionsAllowedState();
             var endTurnState = GetEndTurnStateText();

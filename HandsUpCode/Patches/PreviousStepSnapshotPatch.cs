@@ -15,7 +15,7 @@ public static class CapturePreviousStepSnapshotPatch
 
         try
         {
-            if (!RunManager.Instance.IsSinglePlayerOrFakeMultiplayer)
+            if (!RunManager.Instance.IsSingleplayerOrFakeMultiplayer)
                 return;
 
             if (SingleplayerPreviousStepRestoreStateService.IsRestoreInProgress)

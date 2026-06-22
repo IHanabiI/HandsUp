@@ -92,7 +92,7 @@ public static partial class MultiplayerCombatStateSnapshotService
         .GetMethod("UpdateCreaturePositions", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? SurroundedPowerFaceDirectionMethod = typeof(SurroundedPower)
         .GetMethod("FaceDirection", BindingFlags.Instance | BindingFlags.NonPublic);
-    private static readonly MethodInfo? DoormakerUpdateVisualMethod = typeof(Doormaker)
+    private static readonly MethodInfo? DoormakerUpdateVisualMethod = typeof(Architect)
         .GetMethod("UpdateVisual", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly FieldInfo? NCreatureSpineAnimatorField = typeof(NCreature)
         .GetField("_spineAnimator", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -504,7 +504,7 @@ public static partial class MultiplayerCombatStateSnapshotService
             return;
         }
 
-        if (creature?.Monster is Doormaker doormaker)
+        if (creature?.Monster is Architect doormaker)
         {
             await TrySynchronizeDoormakerVisualStateAsync(creature, doormaker, snapshot, restoreContext, refreshIntentDisplays);
             return;
@@ -674,7 +674,7 @@ public static partial class MultiplayerCombatStateSnapshotService
 
     private static async Task TrySynchronizeDoormakerVisualStateAsync(
         Creature creature,
-        Doormaker doormaker,
+        Architect doormaker,
         CombatCreatureSnapshot snapshot,
         string restoreContext,
         bool refreshIntentDisplays)
@@ -687,9 +687,7 @@ public static partial class MultiplayerCombatStateSnapshotService
 
             var isPortalOpen = TryReadSpecialFieldBool(snapshot.SpecialFields, "_isPortalOpen", out var restoredPortalOpen)
                 ? restoredPortalOpen
-                : ResolveDoormakerPortalOpenFallback(creature, snapshot);
-
-            creature.ShowsInfiniteHp = !isPortalOpen;
+                : ResolveDoormakerPortalOpenFallback(snapshot);
 
             if (isPortalOpen)
             {
@@ -710,35 +708,25 @@ public static partial class MultiplayerCombatStateSnapshotService
         }
     }
 
-    private static bool ResolveDoormakerPortalOpenFallback(Creature creature, CombatCreatureSnapshot snapshot)
+    private static bool ResolveDoormakerPortalOpenFallback(CombatCreatureSnapshot snapshot)
     {
-        if (creature.GetPower<HungerPower>() != null
-            || creature.GetPower<ScrutinyPower>() != null
-            || creature.GetPower<GraspPower>() != null)
-        {
-            return true;
-        }
-
         return !string.IsNullOrWhiteSpace(snapshot.CurrentMoveStateId)
             && !string.Equals(snapshot.CurrentMoveStateId, DoormakerDramaticOpenMoveId, StringComparison.Ordinal);
     }
 
     private static string? ResolveDoormakerVisualPath(Creature creature, CombatCreatureSnapshot snapshot)
     {
-        if (creature.GetPower<GraspPower>() != null
-            || string.Equals(snapshot.CurrentMoveStateId, DoormakerGraspMoveId, StringComparison.Ordinal))
+        if (string.Equals(snapshot.CurrentMoveStateId, DoormakerGraspMoveId, StringComparison.Ordinal))
         {
             return DoormakerHandsVisualPath;
         }
 
-        if (creature.GetPower<ScrutinyPower>() != null
-            || string.Equals(snapshot.CurrentMoveStateId, DoormakerScrutinyMoveId, StringComparison.Ordinal))
+        if (string.Equals(snapshot.CurrentMoveStateId, DoormakerScrutinyMoveId, StringComparison.Ordinal))
         {
             return DoormakerFaceVisualPath;
         }
 
-        if (creature.GetPower<HungerPower>() != null
-            || string.Equals(snapshot.CurrentMoveStateId, DoormakerHungerMoveId, StringComparison.Ordinal))
+        if (string.Equals(snapshot.CurrentMoveStateId, DoormakerHungerMoveId, StringComparison.Ordinal))
         {
             return DoormakerTeethVisualPath;
         }
@@ -2418,7 +2406,7 @@ public static partial class MultiplayerCombatStateSnapshotService
         if (creature?.PetOwner != null)
             return creature.PetOwner.NetId;
 
-        if (!TryResolveKnownPetOwnerPlayer(creature?.CombatState, monsterId, out var petOwner) || petOwner == null)
+        if (!TryResolveKnownPetOwnerPlayer(CombatStateCompatibilityService.GetCombatState(creature?.CombatState), monsterId, out var petOwner) || petOwner == null)
             return null;
 
         var creatureLabel = creature == null
@@ -3107,7 +3095,7 @@ public static partial class MultiplayerCombatStateSnapshotService
                 CharacterId = state.characterId,
                 Energy = state.energy,
                 Stars = state.stars,
-                MaxStars = state.maxStars,
+                MaxStars = state.stars,
                 MaxPotionCount = state.maxPotionCount,
                 Gold = state.gold,
                 Piles = state.piles.Select(pileState =>

@@ -13,6 +13,8 @@ public static class CombatStateCompatibilityService
         .GetMethod("SetPhaseForAllPlayers", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
     private static readonly PropertyInfo? PlayerCombatStatePhaseProperty = typeof(PlayerCombatState)
         .GetProperty("Phase", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly PropertyInfo? CombatManagerIsPlayPhaseProperty = typeof(CombatManager)
+        .GetProperty("IsPlayPhase", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
     public static CombatStateWrapper? Wrap(Creature? creature)
     {
@@ -69,7 +71,7 @@ public static class CombatStateCompatibilityService
 
         return combatState != null
                && combatState.CurrentSide == CombatSide.Player
-               && CombatManager.Instance?.IsPlayPhase == true;
+               && CombatManagerIsPlayPhaseProperty?.GetValue(CombatManager.Instance) is true;
     }
 
     public static bool IsPlayPhase(ICombatState? combatState)

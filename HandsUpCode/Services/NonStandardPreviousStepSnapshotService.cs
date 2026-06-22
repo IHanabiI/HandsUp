@@ -139,7 +139,7 @@ public static class NonStandardPreviousStepSnapshotService
     private static StepSnapshotPayload? BuildSnapshotPayload(RunManager? runManager)
     {
         var runState = runManager?.DebugOnlyGetState();
-        if (runState == null || !runManager!.IsSinglePlayerOrFakeMultiplayer)
+        if (runState == null || !runManager!.IsSingleplayerOrFakeMultiplayer)
             return null;
 
         if (runState.CurrentRoom is not CombatRoom combatRoom || combatRoom.IsPreFinished)

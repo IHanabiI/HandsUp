@@ -196,7 +196,6 @@ public static class SuppressCardRemovedDuringMultiplayerExecuteWindowPatch
     }
 }
 
-[HarmonyPatch(typeof(RewardSynchronizer), "HandlePaelsWingSacrifice")]
 public static class SuppressPaelsWingSacrificeDuringMultiplayerExecuteWindowPatch
 {
     public static bool Prefix(object[] __args)

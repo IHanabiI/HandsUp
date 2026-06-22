@@ -448,7 +448,7 @@ public static class MultiplayerApprovalService
 
         var restartSnapshot = RunManager.Instance.ToSave(null);
         if (restartSnapshot.SerializableRng != null && restartSnapshot.DailyTime == null)
-            restartSnapshot.SerializableRng.Seed = SeedHelper.GetRandomSeed(10);
+            restartSnapshot.SerializableRng.Seed = SeedHelper.GetRandomSeed(runState.Rng.Niche, 10);
 
         return new RaiseHandExecuteMessage
         {
